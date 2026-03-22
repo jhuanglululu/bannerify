@@ -1,0 +1,6 @@
+/target
+
+.claude/
+**/.DS_Store
+input/
+output/

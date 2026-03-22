@@ -1,0 +1,33 @@
+[package]
+name = "bannerify"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.6.0", features = ["derive"] }
+colored = "3.1.1"
+fast_image_resize = { version = "6.0.0", features = ["image"] }
+fastnbt = "2.6.1"
+flate2 = "1.1.9"
+image = "0.25.10"
+indicatif = "0.18.4"
+ndarray = "0.17.2"
+peak_alloc = "0.3.0"
+rand = "0.10.0"
+rayon = "1.11.0"
+rust-embed = { version = "8.11.0", features = ["include-exclude"] }
+serde = "1.0.228"
+toml = "1.0.7"
+wide = "1.2.0"
+
+[profile.release]
+opt-level = 3
+# these options is so fucking slow, only enable if you want to push the limit
+# codegen-units = 1
+# lto = "fat"
+# this is for flamegraph, disable unless you know what you are doing
+# debug = true
+
+[profile.dev]
+opt-level = 0
