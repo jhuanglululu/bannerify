@@ -3,6 +3,14 @@ pub const BANNER_W: usize = 20;
 /// Banner height
 pub const BANNER_H: usize = 40;
 
+/// Size of top half of a banner hidden by another banner above it
+pub const HIDDEN_H: usize = 16;
+/// Size of bottom half of a banner visible when another is banner above it
+pub const VISIBLE_H: usize = BANNER_H - HIDDEN_H;
+
+pub const TOP_HW: usize = BANNER_H * BANNER_W;
+pub const NTOP_HW: usize = VISIBLE_H * BANNER_W;
+
 /// Gap between banner and top edge of block
 pub const PAD_TOP: usize = 4;
 /// Gap between banner and bottom edge of block
@@ -16,12 +24,6 @@ pub const PAD_RIGHT: usize = 2;
 pub const BLOCK_SIDE: usize = 24;
 /// Distance between two banner
 pub const STRIDE: usize = 24;
-
-/// Size of top half of a banner hidden by another banner above it
-pub const HIDDEN_TOP: usize = 16;
-
-/// Size of bottom half of a banner visible when another is banner above it
-pub const VISIBLE_H: usize = BANNER_H - HIDDEN_TOP;
 
 #[inline]
 /// Pixel offset from the left for '`column`'th banner column
@@ -38,7 +40,7 @@ pub const fn wall_width(columns: usize) -> usize {
 #[inline]
 /// Pixel offset from the top for '`rows'`th banner row
 pub const fn offset_row(row: usize) -> usize {
-    row * BLOCK_SIDE + HIDDEN_TOP
+    row * BLOCK_SIDE + HIDDEN_H
 }
 
 #[inline]

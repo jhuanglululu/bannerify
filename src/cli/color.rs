@@ -4,7 +4,7 @@ use colored::Colorize;
 
 static VALID_COLOR_STR: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "\n  valid color format includes: '{}', '{}' and '{}'",
+        "\n       valid color format includes: '{}', '{}' and '{}'",
         "#ff9453".yellow(),
         "9,4,87".yellow(),
         "rgb(11, 45, 14)".yellow()

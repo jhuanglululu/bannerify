@@ -1,25 +1,8 @@
+use wide::f32x8;
+
 pub const NUM_COLORS: usize = 16;
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum DyeColor {
-    White = 0,
-    Orange = 1,
-    Magenta = 2,
-    LightBlue = 3,
-    Yellow = 4,
-    Lime = 5,
-    Pink = 6,
-    Gray = 7,
-    LightGray = 8,
-    Cyan = 9,
-    Purple = 10,
-    Blue = 11,
-    Brown = 12,
-    Green = 13,
-    Red = 14,
-    Black = 15,
-}
+pub const WHITE: usize = 0;
 
 pub const COLOR_NAMES: [&str; NUM_COLORS] = [
     "white",
@@ -61,7 +44,7 @@ pub const COLORS_RGB: [[u8; 3]; NUM_COLORS] = [
 
 /// All 16 colors as f32, shape (16, 3) flattened row-major
 pub const COLORS_F32: [[f32; 3]; NUM_COLORS] = {
-    let mut out = [[0.0f32; 3]; NUM_COLORS];
+    let mut out = [[0.0_f32; 3]; NUM_COLORS];
     let mut i = 0;
     while i < NUM_COLORS {
         out[i][0] = COLORS_RGB[i][0] as f32;
@@ -69,44 +52,61 @@ pub const COLORS_F32: [[f32; 3]; NUM_COLORS] = {
         out[i][2] = COLORS_RGB[i][2] as f32;
         i += 1;
     }
+
     out
 };
 
 /// Perceptual RGB weights (luma)
 pub const W_PERCEPTUAL: [f32; 3] = [0.299, 0.587, 0.114];
 
+/// Perceptual RGB weights (luma)
+pub const W_PERCEPTUAL_X8: [f32x8; 3] = [
+    f32x8::splat(W_PERCEPTUAL[0]),
+    f32x8::splat(W_PERCEPTUAL[1]),
+    f32x8::splat(W_PERCEPTUAL[2]),
+];
+
 /// Weighted squared sum per color: sum(c_i^2 * w_i) for each of 16 colors
 pub const COLORS_WSQ_SUM: [f32; NUM_COLORS] = {
-    let mut out = [0.0f32; NUM_COLORS];
+    let mut out = [0.0_f32; NUM_COLORS];
     let mut i = 0;
     while i < NUM_COLORS {
-        let r = COLORS_F32[i][0];
         let g = COLORS_F32[i][1];
+        let r = COLORS_F32[i][0];
         let b = COLORS_F32[i][2];
         out[i] = r * r * W_PERCEPTUAL[0] + g * g * W_PERCEPTUAL[1] + b * b * W_PERCEPTUAL[2];
+        i += 1;
+    }
+
+    out
+};
+
+pub const COLORS_R: [[f32; 8]; 2] = {
+    let mut out = [[0.0; 8]; 2];
+    let mut i = 0;
+    while i < 16 {
+        out[i / 8][i % 8] = COLORS_RGB[i][0] as f32;
         i += 1;
     }
     out
 };
 
-impl DyeColor {
-    #[inline]
-    pub fn name(&self) -> &'static str {
-        COLOR_NAMES[*self as usize]
+pub const COLORS_G: [[f32; 8]; 2] = {
+    let mut out = [[0.0; 8]; 2];
+    let mut i = 0;
+    while i < 16 {
+        out[i / 8][i % 8] = COLORS_RGB[i][1] as f32;
+        i += 1;
     }
+    out
+};
 
-    #[inline]
-    pub fn rgb(&self) -> [u8; 3] {
-        COLORS_RGB[*self as usize]
+pub const COLORS_B: [[f32; 8]; 2] = {
+    let mut out = [[0.0; 8]; 2];
+    let mut i = 0;
+    while i < 16 {
+        out[i / 8][i % 8] = COLORS_RGB[i][2] as f32;
+        i += 1;
     }
-
-    #[inline]
-    pub fn f32(&self) -> [f32; 3] {
-        COLORS_F32[*self as usize]
-    }
-
-    #[inline]
-    pub fn wsq_sum(&self) -> f32 {
-        COLORS_WSQ_SUM[*self as usize]
-    }
-}
+    out
+};

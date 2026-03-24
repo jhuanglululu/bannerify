@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use crate::cli::complexity::ComplexityOptions;
 use crate::cli::dimension::Dimension;
 use crate::cli::resizing::ResizingMethod;
 
 mod color;
+pub mod complexity;
 pub mod dimension;
 pub mod resizing;
 
@@ -38,15 +40,8 @@ pub struct Args {
     #[arg(long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
-    /// Layer range: MIN MAX
-    #[arg(help_heading = "Generation")]
-    #[arg(short, long, num_args = 2, value_names = ["MIN", "MAX"], default_values_t = [4, 6])]
-    pub layers: Vec<usize>,
-
-    /// Color candidates: MIN MAX
-    #[arg(help_heading = "Generation")]
-    #[arg(long, num_args = 2, value_names = ["MIN", "MAX"], default_values_t = [6, 8])]
-    pub color_candidate: Vec<usize>,
+    #[command(flatten)]
+    pub complexity: ComplexityOptions,
 
     /// Perturbation search: COUNT TOP_N ROUNDS
     #[arg(help_heading = "Generation")]
@@ -62,7 +57,7 @@ pub struct Args {
 fn validate_input(s: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(s);
     if !p.exists() {
-        Err(format!("\n  file not found"))
+        Err("\n  file not found".to_string())
     } else {
         Ok(p)
     }

@@ -1,78 +1,48 @@
-use ndarray::Array3;
-
-use crate::banner::Banner;
-use crate::color::DyeColor;
-use crate::geometry::{
-    BANNER_H, BANNER_W, BLOCK_SIDE, PAD_TOP, VISIBLE_H, offset_column, offset_row,
-};
+use crate::banner::{Banner, NTopBanner, TopBanner};
+use crate::geometry::{BANNER_W, BLOCK_SIDE, PAD_TOP, offset_column, offset_row};
 
 /// split image into banner chunks and return (top banner, non-top banners)
-pub fn split_image(image: &[u8], row: usize, column: usize) -> (Vec<Banner>, Vec<Banner>) {
+pub fn split_image(image: &[u8], row: usize, column: usize) -> (Vec<TopBanner>, Vec<NTopBanner>) {
     let img_width = column * BLOCK_SIDE;
 
-    let top_banners = {
-        let mut pixels = vec![Array3::<f32>::zeros((BANNER_H, BANNER_W, 3)); column];
+    let top = extract_banners_row(image, img_width, 0, column, PAD_TOP);
 
-        for y in 0..BANNER_H {
-            let start = img_width * (PAD_TOP + y);
-            for (c, pixel) in pixels.iter_mut().enumerate() {
-                let offset_x = offset_column(c);
-                for x in 0..BANNER_W {
-                    let px = 3 * (start + offset_x + x);
-
-                    pixel[[y, x, 0]] = image[px] as f32;
-                    pixel[[y, x, 1]] = image[px + 1] as f32;
-                    pixel[[y, x, 2]] = image[px + 2] as f32;
-                }
-            }
-        }
-
-        pixels
-            .into_iter()
-            .enumerate()
-            .map(|(c, arr)| Banner {
-                is_top: true,
-                row: 0,
-                column: c,
-                target: arr,
-                base: DyeColor::White,
-                patterns: Vec::new(),
-            })
-            .collect()
-    };
-
-    let ntop_banners = (1..row)
-        .flat_map(|r| {
-            let mut pixels = vec![Array3::<f32>::zeros((VISIBLE_H, BANNER_W, 3)); column];
-
-            for y in 0..VISIBLE_H {
-                let start = img_width * (offset_row(r) + y);
-                for (c, pixel) in pixels.iter_mut().enumerate() {
-                    let offset_x = offset_column(c);
-                    for x in 0..BANNER_W {
-                        let px = 3 * (start + offset_x + x);
-
-                        pixel[[y, x, 0]] = image[px] as f32;
-                        pixel[[y, x, 1]] = image[px + 1] as f32;
-                        pixel[[y, x, 2]] = image[px + 2] as f32;
-                    }
-                }
-            }
-
-            pixels
-                .into_iter()
-                .enumerate()
-                .map(|(c, arr)| Banner {
-                    is_top: false,
-                    row: r,
-                    column: c,
-                    target: arr,
-                    base: DyeColor::White,
-                    patterns: Vec::new(),
-                })
-                .collect::<Vec<Banner>>()
-        })
+    let ntop = (1..row)
+        .flat_map(|r| extract_banners_row(image, img_width, r, column, offset_row(r)))
         .collect();
 
-    (top_banners, ntop_banners)
+    (top, ntop)
+}
+
+/// extract one row of banner
+fn extract_banners_row<const HW: usize>(
+    image: &[u8],
+    img_width: usize,
+    row: usize,
+    num_col: usize,
+    y_offset: usize,
+) -> Vec<Banner<HW>> {
+    let mut pixels: Vec<_> = (0..num_col)
+        .map(|_| unsafe { Box::<[[f32; HW]; 3]>::new_uninit().assume_init() })
+        .collect();
+
+    for y in 0..HW / BANNER_W {
+        let row_start = img_width * (y_offset + y);
+        for (col, target) in pixels.iter_mut().enumerate() {
+            let base_x = offset_column(col);
+            for x in 0..BANNER_W {
+                let px = 3 * (row_start + base_x + x);
+                let idx = y * BANNER_W + x;
+                target[0][idx] = image[px] as f32;
+                target[1][idx] = image[px + 1] as f32;
+                target[2][idx] = image[px + 2] as f32;
+            }
+        }
+    }
+
+    pixels
+        .into_iter()
+        .enumerate()
+        .map(|(col, arr)| Banner::new(row, col, arr))
+        .collect()
 }

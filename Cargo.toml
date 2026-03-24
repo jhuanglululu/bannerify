@@ -12,14 +12,18 @@ fastnbt = "2.6.1"
 flate2 = "1.1.9"
 image = "0.25.10"
 indicatif = "0.18.4"
-ndarray = "0.17.2"
-peak_alloc = "0.3.0"
+mimalloc = { version = "0.1.48", features = ["v3"] }
 rand = "0.10.0"
 rayon = "1.11.0"
 rust-embed = { version = "8.11.0", features = ["include-exclude"] }
 serde = "1.0.228"
 toml = "1.0.7"
 wide = "1.2.0"
+
+[features]
+# default = ["profiling"] # for testing only
+# this will tell you long each process took, can be quite annoying
+profiling = []
 
 [profile.release]
 opt-level = 3

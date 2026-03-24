@@ -1,6 +1,7 @@
 /target
 
 .claude/
+.idea/
 **/.DS_Store
 input/
 output/
