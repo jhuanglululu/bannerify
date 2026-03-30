@@ -1,97 +1,82 @@
+use crate::block::load_blocks;
 use crate::cli::Args;
-use crate::cli::complexity::ComplexityOptions;
+use crate::cli::config::Config;
 use crate::image::load_image;
 use crate::image::resize::resize_image;
 use crate::image::split::split_image;
 use crate::logger::info;
 use crate::logger::profiler::{finish_profiling, init_profiler, timed};
 use crate::pattern::load_patterns;
-use crate::solver::greedy::complexity::sort_banner_greedy;
-use crate::solver::optimal::complexity::sort_banner_optimal;
+use crate::solver::block::match_blocks;
+use crate::solver::optimal::export;
+use crate::solver::pipeline::process_banners;
 use clap::Parser;
 
 #[cfg(feature = "profiling")]
 mod allocator;
 mod banner;
+mod block;
 mod cli;
 mod color;
+mod export;
 mod geometry;
 mod image;
+mod lab;
 mod logger;
+mod math;
 mod pattern;
 mod solver;
 
 fn main() {
     init_profiler();
     let args = Args::parse();
+    let mut config = Config::from(args);
 
-    let patterns = load_patterns(
-        args.exclude_patterns
-            .map(|x| x.rsplit(',').map(|p| p.to_string()).collect())
-            .unwrap_or_default(),
-    );
-    timed!("patterns loaded");
-
-    let image = load_image(&args.input);
-    timed!("image loaded");
-
-    let (row, column, resized_image) = resize_image(&image, args.dimension, args.resizing_method);
-    timed!("image resized");
-
-    info!(
-        "grid: {}x{} blocks ({} banners)",
-        column,
-        row + 1,
-        column * row
-    );
-
-    let (top_banners, ntop_banners) = split_image(&resized_image, row, column);
-    timed!("image splitted");
-
-    match &args.complexity {
-        ComplexityOptions::Optimal(complexity) => {
-            info!("using optimal-color algoirthm");
-
-            let mut layer_dist = vec![0; complexity.layers.1 - complexity.layers.0 + 1];
-            let top_tasks = sort_banner_optimal(top_banners, complexity, &mut layer_dist);
-            let ntop_tasks = sort_banner_optimal(ntop_banners, complexity, &mut layer_dist);
-            timed!("banners sorted");
-            info!(
-                "layer distribution: {}",
-                format_distrbution(complexity.layers.0, layer_dist)
-            );
-        }
-        ComplexityOptions::Greedy(complexity) => {
-            info!("using greedy algoirthm");
-
-            let mut layer_dist = vec![0; complexity.layers.1 - complexity.layers.0 + 1];
-            let mut color_dist = vec![0; complexity.colors.1 - complexity.colors.0 + 1];
-            let top_tasks =
-                sort_banner_greedy(top_banners, complexity, &mut layer_dist, &mut color_dist);
-            let ntop_tasks =
-                sort_banner_greedy(ntop_banners, complexity, &mut layer_dist, &mut color_dist);
-            timed!("banners sorted");
-            info!(
-                "layer distribution: {}",
-                format_distrbution(complexity.layers.0, layer_dist)
-            );
-            info!(
-                "color distribution: {}",
-                format_distrbution(complexity.colors.0, color_dist)
-            );
-        }
+    if let Some(workers) = config.workers {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build_global()
+            .unwrap();
     }
 
-    finish_profiling!();
-}
+    info!("using {} workers", rayon::current_num_threads());
 
-fn format_distrbution(offset: usize, dist: Vec<usize>) -> String {
-    format!(
-        "{{ {} }}",
-        dist.iter()
-            .enumerate()
-            .map(|(i, count)| format!("{}: {}", i + offset, count))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    let patterns = load_patterns(&mut config.exclude_patterns);
+    info!("loaded {} patterns", patterns.pattern_ids.len());
+    timed!("patterns loaded");
+
+    let image = load_image(&config.input);
+    timed!("image loaded");
+
+    let (row, col, resized_image) = resize_image(&image, config.dimension, config.resizing_method);
+    drop(image);
+    timed!("image resized");
+
+    info!("grid: {}x{} blocks ({} banners)", col, row + 1, col * row);
+
+    let (top_banners, ntop_banners) = split_image(&resized_image, row, col);
+    timed!("image splitted");
+
+    let (banners, top_cache, ntop_cache) =
+        process_banners(&config, patterns, top_banners, ntop_banners);
+    timed!("banners processed");
+
+    let blocks = load_blocks(&mut config.exclude_blocks);
+    info!("loaded {} blocks", blocks.img_ids.len());
+    timed!("blocks loaded");
+
+    let matched_block = match_blocks(&resized_image, (row, col), &blocks);
+    timed!("block matched");
+
+    export(
+        &config.output,
+        (row, col),
+        &blocks.pixels,
+        &matched_block,
+        top_cache,
+        ntop_cache,
+    );
+    timed!("file exported");
+
+    finish_profiling!();
 }

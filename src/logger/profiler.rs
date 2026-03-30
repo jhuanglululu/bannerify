@@ -4,12 +4,18 @@ pub fn init_profiler() {
     crate::logger::profiler::timing_internal::init_clock();
 }
 
+#[cfg(feature = "profiling")]
+pub fn profile_print(message: String) {
+    use colored::Colorize;
+    println!("{:}: {}", "profiling".blue().bold(), message);
+}
+
 // timing
 
 #[cfg(feature = "profiling")]
 macro_rules! timed {
     ($label:expr) => {{
-        $crate::logger::profile_print(format!(
+        $crate::logger::profiler::profile_print(format!(
             "{} in {} ms",
             $label,
             $crate::logger::profiler::timing_internal::since_last().as_millis(),
@@ -19,18 +25,18 @@ macro_rules! timed {
 
 #[cfg(not(feature = "profiling"))]
 macro_rules! timed {
-    ($label:expr) => {};
+    ($label:expr) => {{}};
 }
 
 #[cfg(feature = "profiling")]
 macro_rules! finish_profiling {
     () => {{
-        $crate::logger::profile_print(format!(
+        $crate::logger::profiler::profile_print(format!(
             "program finished in {:.3} seconds",
             $crate::logger::profiler::timing_internal::elapsed().as_secs_f64(),
         ));
 
-        $crate::logger::profile_print(format!(
+        $crate::logger::profiler::profile_print(format!(
             "peak memory usage: {:.3} mb",
             $crate::logger::profiler::ALLOCATOR.peak_usage_as_mb()
         ));

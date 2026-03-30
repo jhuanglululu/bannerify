@@ -18,12 +18,15 @@ macro_rules! error {
     }};
 }
 
+macro_rules! error_out {
+    ($($arg:tt)*) => {{
+        $crate::logger::error_print(format!($($arg)*));
+        std::process::exit(1);
+    }};
+}
+
 pub fn error_print(message: String) {
     eprintln!("{:}: {}", "error".red().bold(), message);
 }
 
-pub fn profile_print(message: String) {
-    println!("{:}: {}", "profiling".blue().bold(), message);
-}
-
-pub(crate) use {error, info};
+pub(crate) use {error, error_out, info};

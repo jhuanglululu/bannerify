@@ -2,8 +2,6 @@ use wide::f32x8;
 
 pub const NUM_COLORS: usize = 16;
 
-pub const WHITE: usize = 0;
-
 pub const COLOR_NAMES: [&str; NUM_COLORS] = [
     "white",
     "orange",
@@ -74,39 +72,38 @@ pub const COLORS_WSQ_SUM: [f32; NUM_COLORS] = {
         let g = COLORS_F32[i][1];
         let r = COLORS_F32[i][0];
         let b = COLORS_F32[i][2];
-        out[i] = r * r * W_PERCEPTUAL[0] + g * g * W_PERCEPTUAL[1] + b * b * W_PERCEPTUAL[2];
-        i += 1;
-    }
-
-    out
-};
-
-pub const COLORS_R: [[f32; 8]; 2] = {
-    let mut out = [[0.0; 8]; 2];
-    let mut i = 0;
-    while i < 16 {
-        out[i / 8][i % 8] = COLORS_RGB[i][0] as f32;
+        out[i] = W_PERCEPTUAL[0] * r * r + W_PERCEPTUAL[1] * g * g + W_PERCEPTUAL[2] * b * b;
         i += 1;
     }
     out
 };
 
-pub const COLORS_G: [[f32; 8]; 2] = {
-    let mut out = [[0.0; 8]; 2];
+pub const COLORS_R: [f32x8; 2] = {
+    let mut red = [[0.0; 8]; 2];
     let mut i = 0;
-    while i < 16 {
-        out[i / 8][i % 8] = COLORS_RGB[i][1] as f32;
+    while i < NUM_COLORS {
+        red[i / 8][i % 8] = COLORS_F32[i][0];
         i += 1;
     }
-    out
+    [f32x8::new(red[0]), f32x8::new(red[1])]
 };
 
-pub const COLORS_B: [[f32; 8]; 2] = {
-    let mut out = [[0.0; 8]; 2];
+pub const COLORS_G: [f32x8; 2] = {
+    let mut green = [[0.0; 8]; 2];
     let mut i = 0;
-    while i < 16 {
-        out[i / 8][i % 8] = COLORS_RGB[i][2] as f32;
+    while i < NUM_COLORS {
+        green[i / 8][i % 8] = COLORS_F32[i][1];
         i += 1;
     }
-    out
+    [f32x8::new(green[0]), f32x8::new(green[1])]
+};
+
+pub const COLORS_B: [f32x8; 2] = {
+    let mut blue = [[0.0; 8]; 2];
+    let mut i = 0;
+    while i < NUM_COLORS {
+        blue[i / 8][i % 8] = COLORS_F32[i][2];
+        i += 1;
+    }
+    [f32x8::new(blue[0]), f32x8::new(blue[1])]
 };

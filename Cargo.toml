@@ -4,14 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-base64 = "0.22.1"
-clap = { version = "4.6.0", features = ["derive"] }
+askama = "0.15.6"
+base64-simd = "0.8.0"
+clap = { version = "4.6.0", features = ["derive", "wrap_help"] }
 colored = "3.1.1"
 fast_image_resize = { version = "6.0.0", features = ["image"] }
 fastnbt = "2.6.1"
-flate2 = "1.1.9"
 image = "0.25.10"
-indicatif = "0.18.4"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 rand = "0.10.0"
 rayon = "1.11.0"
@@ -21,7 +20,6 @@ toml = "1.0.7"
 wide = "1.2.0"
 
 [features]
-# default = ["profiling"] # for testing only
 # this will tell you long each process took, can be quite annoying
 profiling = []
 

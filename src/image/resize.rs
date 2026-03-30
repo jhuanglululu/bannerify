@@ -1,21 +1,39 @@
 use fast_image_resize::{PixelType, ResizeOptions, Resizer};
 use image::RgbImage;
 
-use crate::cli::dimension::Dimension;
-use crate::cli::resizing::ResizingMethod;
-use crate::geometry::{wall_height, wall_width};
-use crate::logger::error;
+use crate::cli::config::{Dimension, ResizingMethod};
+use crate::geometry::*;
+use crate::logger::error_out;
 
 pub fn resize_image(
     source: &RgbImage,
     dimension: Dimension,
     resizing_method: ResizingMethod,
-) -> (usize, usize, Vec<u8>) {
-    match resizing_method {
+) -> (usize, usize, [Vec<u8>; 3]) {
+    let (row, col, img_interleaved) = match resizing_method {
         ResizingMethod::Fit => fit_image(source, dimension),
         ResizingMethod::Fill(color) => fill_image(source, dimension, color),
         ResizingMethod::Stretch => stretch_image(source, dimension),
+    };
+
+    let ch_len = img_interleaved.len() / 3;
+    let mut r = Vec::with_capacity(ch_len);
+    let mut g = Vec::with_capacity(ch_len);
+    let mut b = Vec::with_capacity(ch_len);
+
+    unsafe {
+        r.set_len(ch_len);
+        g.set_len(ch_len);
+        b.set_len(ch_len);
     }
+
+    for (px_idx, px) in img_interleaved.chunks_exact(3).enumerate() {
+        r[px_idx] = px[0];
+        g[px_idx] = px[1];
+        b[px_idx] = px[2];
+    }
+
+    (row, col, [r, g, b])
 }
 
 fn fit_image(image: &RgbImage, dimension: Dimension) -> (usize, usize, Vec<u8>) {
@@ -35,18 +53,17 @@ fn fit_image(image: &RgbImage, dimension: Dimension) -> (usize, usize, Vec<u8>) 
     let crop_h = height as f64 / scale;
     let crop_x = (img_w as f64 - crop_w) / 2.0;
     let crop_y = (img_h as f64 - crop_h) / 2.0;
-    let mut resize_img = fast_image_resize::images::Image::new(width, height, PixelType::U8x3);
+    let mut resized_img = fast_image_resize::images::Image::new(width, height, PixelType::U8x3);
     let mut resizer = Resizer::new();
     let options = ResizeOptions::new().crop(crop_x, crop_y, crop_w, crop_h);
 
     resizer
-        .resize(image, &mut resize_img, &options)
+        .resize(image, &mut resized_img, &options)
         .unwrap_or_else(|e| {
-            error!("{}", e);
-            std::process::exit(1);
+            error_out!("{}", e);
         });
 
-    (row, col, resize_img.into_vec())
+    (row, col, resized_img.into_vec())
 }
 
 fn fill_image(image: &RgbImage, dimension: Dimension, color: [u8; 3]) -> (usize, usize, Vec<u8>) {
@@ -64,14 +81,15 @@ fn fill_image(image: &RgbImage, dimension: Dimension, color: [u8; 3]) -> (usize,
     let scale = f64::min(width as f64 / img_w as f64, height as f64 / img_h as f64);
     let resize_w = f64::ceil(img_w as f64 * scale) as u32;
     let resize_h = f64::ceil(img_h as f64 * scale) as u32;
-    let mut resize_img = fast_image_resize::images::Image::new(resize_w, resize_h, PixelType::U8x3);
+    let mut resized_img =
+        fast_image_resize::images::Image::new(resize_w, resize_h, PixelType::U8x3);
     let mut resizer = Resizer::new();
     resizer
-        .resize(image, &mut resize_img, &ResizeOptions::new())
-        .unwrap_or_else(|e| error!("{}", e));
+        .resize(image, &mut resized_img, &ResizeOptions::new())
+        .unwrap_or_else(|e| error_out!("{}", e));
 
     // overlay
-    let resized_buf = resize_img.buffer();
+    let resized_buf = resized_img.buffer();
     let mut out = [color[0], color[1], color[2]].repeat((width * height) as usize);
 
     let x_offset = (width - resize_w) / 2;
@@ -99,13 +117,13 @@ fn stretch_image(image: &RgbImage, dimension: Dimension) -> (usize, usize, Vec<u
     let height = wall_height(row) as u32;
 
     // reize
-    let mut resize_img = fast_image_resize::images::Image::new(width, height, PixelType::U8x3);
+    let mut resized_img = fast_image_resize::images::Image::new(width, height, PixelType::U8x3);
     let mut resizer = Resizer::new();
     resizer
-        .resize(image, &mut resize_img, &ResizeOptions::new())
-        .unwrap_or_else(|e| error!("{}", e));
+        .resize(image, &mut resized_img, &ResizeOptions::new())
+        .unwrap_or_else(|e| error_out!("{}", e));
 
-    (row, col, resize_img.into_vec())
+    (row, col, resized_img.into_vec())
 }
 
 /// find the best row/column that minimize distortion

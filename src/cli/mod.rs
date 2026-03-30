@@ -1,64 +1,76 @@
 use std::path::PathBuf;
 
-use crate::cli::complexity::ComplexityOptions;
-use crate::cli::dimension::Dimension;
-use crate::cli::resizing::ResizingMethod;
+use config::OptimalEnum;
 
-mod color;
-pub mod complexity;
-pub mod dimension;
-pub mod resizing;
+pub mod config;
 
 #[derive(clap::Parser)]
 pub struct Args {
     /// Input image path
-    #[arg(value_parser = validate_input)]
     pub input: PathBuf,
     /// Output html path
-    pub output: String,
+    pub output: PathBuf,
 
-    #[command(flatten)]
-    pub dimension: Dimension,
-
-    #[command(flatten)]
-    pub resizing_method: ResizingMethod,
+    /// Height of output in blocks (number of banner rows + 1)
+    #[arg(short, long)]
+    pub row: Option<usize>,
+    /// Width of output in blocks
+    #[arg(short, long)]
+    pub columns: Option<usize>,
 
     /// TOML config file
     #[arg(short = 'f', long = "config", value_name = "CONFIG_FILE")]
-    pub config: Option<String>,
+    pub config: Option<PathBuf>,
 
-    /// Parallel workers
-    #[arg(short, long, value_name = "NUMBER_OF_WORKERS", default_value_t = 1)]
-    pub workers: usize,
+    /// Parallel workers [default: CPU count]
+    #[arg(short, long, value_name = "NUMBER_OF_WORKERS")]
+    pub workers: Option<usize>,
 
-    /// Max banners per batch chunk
+    /// Fit image, preserving aspect ratio [default]
+    #[arg(help_heading = "Layout")]
     #[arg(long)]
-    pub batch_size: Option<usize>,
+    pub fit: bool,
+    /// Stretch image to fill empty space
+    #[arg(help_heading = "Layout")]
+    #[arg(long)]
+    pub stretch: bool,
+    /// Fill empty space with the given color (e.g. '#ff9453', 'rgb(114, 5, 14)', '9,4,87')
+    #[arg(help_heading = "Layout")]
+    #[arg(long, value_name = "COLOR")]
+    pub fill: Option<String>,
 
-    /// Pattern names to exclude (comma-separated)
+    /// Pattern ids to exclude (comma-separated)
     #[arg(help_heading = "Generation")]
-    #[arg(long, value_name = "PATTERNS")]
+    #[arg(short = 'E', long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
-    #[command(flatten)]
-    pub complexity: ComplexityOptions,
-
-    /// Perturbation search: COUNT TOP_N ROUNDS
+    /// Block ids to exclude (comma-separated)
     #[arg(help_heading = "Generation")]
-    #[arg(short, long, num_args = 3, value_names = ["COUNT", "TOP_N", "ROUNDS"], default_values_t = [3, 2, 2])]
+    #[arg(short = 'E', long, value_name = "BLOCKS")]
+    pub exclude_blocks: Option<String>,
+
+    /// Layer Range: [MIN MAX] [default: 4 6]
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'L', long, num_args = 2, value_names = ["MIN", "MAX"])]
+    pub layer_range: Vec<usize>,
+
+    /// Color Range: [MIN MAX] [default: 4 6]
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'C', long, num_args = 2, value_names = ["MIN", "MAX"])]
+    pub color_range: Vec<usize>,
+
+    /// Use optimal algorithm for
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'O', long, num_args = 0.., value_enum, value_name = "STAGE")]
+    pub optimal: Vec<OptimalEnum>,
+
+    /// Perturbation search: [TOP_N, DUPLICATES, ROUNDS]
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
 
     /// Enable CIELAB refinement pass
     #[arg(help_heading = "Generation")]
-    #[arg(long, value_name = "NUMBER_OF_CANDIDATES")]
+    #[arg(short = 'l', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub lab_refine: Option<usize>,
-}
-
-fn validate_input(s: &str) -> Result<PathBuf, String> {
-    let p = PathBuf::from(s);
-    if !p.exists() {
-        Err("\n  file not found".to_string())
-    } else {
-        Ok(p)
-    }
 }

@@ -1,53 +1,38 @@
-use crate::geometry::{NTOP_HW, TOP_HW};
+use crate::geometry::*;
 
-pub struct Banner<const HW: usize> {
-    pub row: usize,
-    pub column: usize,
-    pub target: Box<[[f32; HW]; 3]>,
-    pub n_layers: usize,
-}
-
-pub type TopBanner = Banner<TOP_HW>;
-pub type NTopBanner = Banner<NTOP_HW>;
-
-pub struct GreedyBanner<const HW: usize> {
-    pub row: usize,
-    pub column: usize,
+pub struct Banner<const HW: usize, const HW_DIV_8: usize> {
     pub target: Box<[[f32; HW]; 3]>,
     pub n_layers: usize,
     pub color_candidates: Vec<usize>,
 }
 
-pub type TopGreedyBanner = GreedyBanner<TOP_HW>;
-pub type NTopGreedyBanner = GreedyBanner<NTOP_HW>;
+const TOP_HW_DIV_8: usize = TOP_HW / 8;
+const NTOP_HW_DIV_8: usize = NTOP_HW / 8;
+
+pub type TopBanner = Banner<TOP_HW, TOP_HW_DIV_8>;
+pub type NTopBanner = Banner<NTOP_HW, NTOP_HW_DIV_8>;
+/// (pattern_idx, color_idx, cache)
+pub type PrefixPatternCache<const HW: usize> = Vec<(usize, usize, [[f32; HW]; 3])>;
+/// (pattern_idx, color_idx, cache)
+pub type SuffixPatternCache<const HW: usize> = Vec<(usize, usize, [[f32; HW]; 3])>;
 
 pub struct BannerResult {
-    pub row: usize,
-    pub column: usize,
     pub base: usize,
     pub patterns: Vec<(usize, usize)>, // (pattern_idx, color_idx)
 }
 
-impl<const HW: usize> Banner<HW> {
-    pub fn new(row: usize, column: usize, target: Box<[[f32; HW]; 3]>) -> Self {
+impl<const HW: usize, const HW_DIV_8: usize> Banner<HW, HW_DIV_8> {
+    pub fn new(target: Box<[[f32; HW]; 3]>) -> Self {
         Self {
-            row,
-            column,
             target,
             n_layers: 0,
+            color_candidates: Vec::new(),
         }
     }
 }
 
-impl<const HW: usize> GreedyBanner<HW> {
-    #[inline]
-    pub fn from_banner(value: Banner<HW>, color_candidates: Vec<usize>) -> Self {
-        Self {
-            row: value.row,
-            column: value.column,
-            target: value.target,
-            n_layers: value.n_layers,
-            color_candidates,
-        }
+impl BannerResult {
+    pub fn new(base: usize, patterns: Vec<(usize, usize)>) -> Self {
+        Self { base, patterns }
     }
 }
