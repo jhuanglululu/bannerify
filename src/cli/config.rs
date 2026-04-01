@@ -1,7 +1,5 @@
 use crate::cli::Args;
-use crate::color::NUM_COLORS;
 use crate::logger::error_out;
-use clap::ValueEnum;
 use colored::Colorize;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -18,13 +16,13 @@ pub struct Config {
     pub resizing_method: ResizingMethod,
     pub exclude_patterns: HashSet<String>,
     pub exclude_blocks: HashSet<String>,
-    pub complexity: ComplexityOptions,
-    pub optimal: OptimalOption,
+    pub n_layers: (usize, usize),
+    pub refinement: RefinementConfig,
     pub perturbations: Option<(usize, usize, usize)>,
     pub lab_refine: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct ConfigToml {
     pub workers: Option<usize>,
     pub fit: Option<bool>,
@@ -33,8 +31,10 @@ pub struct ConfigToml {
     pub exclude_patterns: Option<Vec<String>>,
     pub exclude_blocks: Option<Vec<String>>,
     pub layer_range: Option<Vec<usize>>,
-    pub color_range: Option<Vec<usize>>,
-    pub optimal: Option<Vec<OptimalEnum>>,
+    pub refinement_pass: Option<usize>,
+    pub window_size: Option<usize>,
+    pub error_threshold: Option<f32>,
+    pub refine_candidate: Option<usize>,
     pub perturbations: Option<Vec<usize>>,
     pub lab_refine: Option<usize>,
 }
@@ -46,43 +46,22 @@ pub enum Dimension {
 }
 
 #[derive(Clone, Copy)]
-pub struct ComplexityOptions {
-    pub layers: (usize, usize),
-    pub colors: (usize, usize),
-}
-
-#[derive(Clone, Copy)]
 pub enum ResizingMethod {
     Fit,
     Fill([u8; 3]),
     Stretch,
 }
 
-#[derive(Debug, Clone, PartialEq, ValueEnum, Deserialize)]
-pub enum OptimalEnum {
-    Initial,
-    Refine,
-    Perturbation,
-    LabRefine,
-}
-
-#[derive(Clone, Copy)]
-pub struct OptimalOption {
-    pub initial: bool,
-    pub refine: bool,
-    pub perturbation: bool,
-    pub lab_refine: bool,
-}
-
-impl OptimalOption {
-    pub fn has_greedy(&self) -> bool {
-        !(self.initial && self.refine && self.perturbation && self.lab_refine)
-    }
+pub struct RefinementConfig {
+    pub refinement_pass: usize,
+    pub window_size: usize,
+    pub error_threshold: f32,
+    pub refine_candidate: usize,
 }
 
 impl From<Args> for Config {
     fn from(args: Args) -> Self {
-        if let Some(ref config_path) = args.config {
+        let (config, config_path) = if let Some(ref config_path) = args.config {
             if !config_path.exists() {
                 error_out!(
                     "'{}' does not exists",
@@ -108,7 +87,7 @@ impl From<Args> for Config {
                     );
                 });
 
-            let mut config = match toml::from_slice::<ConfigToml>(&config_buf) {
+            let config = match toml::from_slice::<ConfigToml>(&config_buf) {
                 Ok(table) => table,
                 Err(e) => {
                     error_out!(
@@ -119,76 +98,61 @@ impl From<Args> for Config {
                 }
             };
 
-            Config {
-                input: validate_input(args.input),
-                output: args.output,
-                dimension: parse_dimension(args.row, args.columns),
-                workers: args.workers.or(config.workers),
-                resizing_method: parse_resizing_method(
-                    args.fit,
-                    args.stretch,
-                    args.fill.as_deref(),
-                    Some(&config),
-                ),
-                exclude_patterns: HashSet::from_iter(
-                    args.exclude_patterns
-                        .map(|pat| pat.split(',').map(|p| p.to_string()).collect())
-                        .or(config.exclude_patterns.take())
-                        .unwrap_or_default(),
-                ),
-                exclude_blocks: HashSet::from_iter(
-                    args.exclude_blocks
-                        .map(|pat| pat.split(',').map(|p| p.to_string()).collect())
-                        .or(config.exclude_blocks.take())
-                        .unwrap_or_default(),
-                ),
-                complexity: parse_complextiy(
-                    Some(&config_path.display().to_string()),
-                    &args.layer_range,
-                    &args.color_range,
-                    Some(&config),
-                ),
-                optimal: parse_optimal(&args.optimal, config.optimal.as_deref()),
-                perturbations: parse_perturbation(
-                    Some(&config_path.display().to_string()),
-                    &args.perturbations,
-                    config.perturbations,
-                ),
-                lab_refine: args.lab_refine.or(config.lab_refine),
-            }
+            (config, config_path.display().to_string())
         } else {
-            Config {
-                input: validate_input(args.input),
-                output: args.output,
-                dimension: parse_dimension(args.row, args.columns),
-                workers: args.workers,
-                resizing_method: parse_resizing_method(
-                    args.fit,
-                    args.stretch,
-                    args.fill.as_deref(),
-                    None,
+            (ConfigToml::default(), String::new())
+        };
+
+        let n_layers = parse_n_layers(&config_path, &args.layer_range, config.layer_range);
+
+        Config {
+            input: validate_input(args.input),
+            output: args.output,
+            dimension: parse_dimension(args.row, args.columns),
+            workers: args.workers.or(config.workers),
+            resizing_method: parse_resizing_method(
+                args.fit,
+                args.stretch,
+                args.fill.as_deref(),
+                (config.fit, config.stretch, config.fill.as_deref()),
+            ),
+            exclude_patterns: HashSet::from_iter(
+                args.exclude_patterns
+                    .map(|pat| pat.split(',').map(|p| p.to_string()).collect())
+                    .or(config.exclude_patterns)
+                    .unwrap_or_default(),
+            ),
+            exclude_blocks: HashSet::from_iter(
+                args.exclude_blocks
+                    .map(|pat| pat.split(',').map(|p| p.to_string()).collect())
+                    .or(config.exclude_blocks)
+                    .unwrap_or_default(),
+            ),
+            n_layers,
+            refinement: RefinementConfig {
+                refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
+                window_size: parse_window_size(
+                    &config_path,
+                    n_layers.0,
+                    args.window_size,
+                    config.window_size,
                 ),
-                exclude_patterns: args
-                    .exclude_patterns
-                    .map(|pat| {
-                        pat.rsplit(',')
-                            .map(|p| p.to_string())
-                            .collect::<HashSet<String>>()
-                    })
-                    .unwrap_or_default(),
-                exclude_blocks: args
-                    .exclude_blocks
-                    .map(|pat| {
-                        pat.rsplit(',')
-                            .map(|p| p.to_string())
-                            .collect::<HashSet<String>>()
-                    })
-                    .unwrap_or_default(),
-                complexity: parse_complextiy(None, &args.layer_range, &args.color_range, None),
-                optimal: parse_optimal(&args.optimal, None),
-                perturbations: parse_perturbation(None, &args.perturbations, None),
-                lab_refine: args.lab_refine,
-            }
+                error_threshold: parse_error_threshold(
+                    &config_path,
+                    args.error_threshold,
+                    config.error_threshold,
+                ),
+                refine_candidate: args
+                    .refine_candidate
+                    .or(config.refine_candidate)
+                    .unwrap_or(5),
+            },
+            perturbations: parse_perturbation(
+                &config_path,
+                &args.perturbations,
+                config.perturbations,
+            ),
+            lab_refine: args.lab_refine.or(config.lab_refine),
         }
     }
 }
@@ -225,7 +189,7 @@ fn parse_resizing_method(
     fit: bool,
     stretch: bool,
     fill: Option<&str>,
-    config_toml: Option<&ConfigToml>,
+    config_settings: (Option<bool>, Option<bool>, Option<&str>),
 ) -> ResizingMethod {
     match (fit, stretch, fill) {
         (true, false, None) => ResizingMethod::Fit,
@@ -236,33 +200,27 @@ fn parse_resizing_method(
                 error_out!("{}", e);
             }
         },
-        (false, false, None) => {
-            if let Some(config) = config_toml {
-                match (config.fit, config.stretch, &config.fill) {
-                    (Some(true), Some(false) | None, None) => ResizingMethod::Fit,
-                    (Some(false) | None, Some(true), None) => ResizingMethod::Stretch,
-                    (Some(false) | None, Some(false) | None, Some(color_str)) => {
-                        match parse_color(color_str) {
-                            Ok(color) => ResizingMethod::Fill(color),
-                            Err(e) => {
-                                error_out!("{}", e);
-                            }
-                        }
-                    }
-                    (Some(false) | None, Some(false) | None, None) => ResizingMethod::Fit,
-                    _ => {
-                        error_out!(
-                            "only one of '{}', '{}' or '{}' can exist in config",
-                            "fit".yellow(),
-                            "stretch".yellow(),
-                            "fill".yellow()
-                        );
+        (false, false, None) => match (config_settings.0, config_settings.1, config_settings.2) {
+            (Some(true), Some(false) | None, None) => ResizingMethod::Fit,
+            (Some(false) | None, Some(true), None) => ResizingMethod::Stretch,
+            (Some(false) | None, Some(false) | None, Some(color_str)) => {
+                match parse_color(color_str) {
+                    Ok(color) => ResizingMethod::Fill(color),
+                    Err(e) => {
+                        error_out!("{}", e);
                     }
                 }
-            } else {
-                ResizingMethod::Fit
             }
-        }
+            (Some(false) | None, Some(false) | None, None) => ResizingMethod::Fit,
+            _ => {
+                error_out!(
+                    "only one of '{}', '{}' or '{}' can exist in config",
+                    "fit".yellow(),
+                    "stretch".yellow(),
+                    "fill".yellow()
+                );
+            }
+        },
         _ => {
             error_out!(
                 "only one of '{}', '{}' or '{}' can be entered",
@@ -274,45 +232,23 @@ fn parse_resizing_method(
     }
 }
 
-fn parse_complextiy(
-    config_name: Option<&str>,
+fn parse_n_layers(
+    config_path: &str,
     layers_vec: &[usize],
-    colors_vec: &[usize],
-    config_toml: Option<&ConfigToml>,
-) -> ComplexityOptions {
+    config_vec: Option<Vec<usize>>,
+) -> (usize, usize) {
     let layers = if !layers_vec.is_empty() {
         (layers_vec[0], layers_vec[1])
-    } else if let Some(config) = config_toml
-        && let Some(ref layer_range) = config.layer_range
-    {
+    } else if let Some(ref layer_range) = config_vec {
         if layer_range.len() != 2 {
             error_out!(
                 "'{}' in '{}' can only have two elements: '{}'",
                 "layer_range".yellow(),
-                config_name.unwrap().yellow(),
+                config_path.yellow(),
                 "[MIN, MAX]".yellow(),
             );
         }
         (layer_range[0], layer_range[1])
-    } else {
-        (4, 6)
-    };
-
-    let colors = if !colors_vec.is_empty() {
-        (colors_vec[0], colors_vec[1])
-    } else if let Some(config) = config_toml
-        && let Some(ref color_range) = config.color_range
-    {
-        if color_range.len() != 2 {
-            error_out!(
-                "'{}' in '{}' can only have '{}' elements: '{}'",
-                "color_range".yellow(),
-                config_name.unwrap().yellow(),
-                "two".yellow(),
-                "[MIN, MAX]".yellow(),
-            );
-        }
-        (color_range[0], color_range[1])
     } else {
         (4, 6)
     };
@@ -326,15 +262,6 @@ fn parse_complextiy(
         );
     }
 
-    if colors.0 > colors.1 {
-        error_out!(
-            "'{}' can not be greater than '{}' in '{}'",
-            "MIN".yellow(),
-            "MAX".yellow(),
-            "color_range".yellow(),
-        );
-    }
-
     if layers.0 < 1 {
         error_out!(
             "'{}' can not be less than '{}' in '{}'",
@@ -344,54 +271,87 @@ fn parse_complextiy(
         );
     }
 
-    if colors.0 < 1 {
-        error_out!(
-            "'{}' can not be less than '{}' in '{}'",
-            "MIN".yellow(),
-            "1".yellow(),
-            "color_range".yellow(),
-        );
-    }
-
-    if colors.1 > NUM_COLORS {
-        error_out!(
-            "'{}' can not be greater than '{}' in '{}'",
-            "MIN".yellow(),
-            NUM_COLORS.to_string().yellow(),
-            "color_range".yellow(),
-        );
-    }
-
-    ComplexityOptions { layers, colors }
+    layers
 }
 
-fn parse_optimal(args: &[OptimalEnum], config: Option<&[OptimalEnum]>) -> OptimalOption {
-    if !args.is_empty() {
-        OptimalOption {
-            initial: args.contains(&OptimalEnum::Initial),
-            refine: args.contains(&OptimalEnum::Refine),
-            perturbation: args.contains(&OptimalEnum::Perturbation),
-            lab_refine: args.contains(&OptimalEnum::LabRefine),
+fn parse_window_size(
+    config_path: &str,
+    min_layer: usize,
+    window_size: Option<usize>,
+    config: Option<usize>,
+) -> usize {
+    if let Some(k) = window_size {
+        if k < 1 {
+            error_out!(
+                "'{}' value need to be greater than '{}'",
+                "--window-size".yellow(),
+                "1".yellow(),
+            )
         }
-    } else if let Some(optimal_vec) = config {
-        OptimalOption {
-            initial: optimal_vec.contains(&OptimalEnum::Initial),
-            refine: optimal_vec.contains(&OptimalEnum::Refine),
-            perturbation: optimal_vec.contains(&OptimalEnum::Perturbation),
-            lab_refine: optimal_vec.contains(&OptimalEnum::LabRefine),
+
+        if min_layer < k {
+            error_out!(
+                "'{}' value need to be less than '{}': '{}'",
+                "--window-size".yellow(),
+                "MIN-LAYERS".yellow(),
+                min_layer.to_string().yellow(),
+            )
         }
+        k
+    } else if let Some(k) = config {
+        if k < 1 {
+            error_out!(
+                "'{}' in '{}' needs to be greater '{}'",
+                "window-size".yellow(),
+                config_path.yellow(),
+                "1".yellow(),
+            );
+        }
+
+        if min_layer < k {
+            error_out!(
+                "'{}' in '{}' needs to be less than '{}': '{}'",
+                "window-size".yellow(),
+                config_path.yellow(),
+                "MIN-LAYERS".yellow(),
+                min_layer.to_string().yellow(),
+            )
+        }
+        k
     } else {
-        OptimalOption {
-            initial: false,
-            refine: false,
-            perturbation: false,
-            lab_refine: false,
+        2
+    }
+}
+
+fn parse_error_threshold(config_path: &str, threshold: Option<f32>, config: Option<f32>) -> f32 {
+    if let Some(thresh) = threshold {
+        if !(0.0..=1.0).contains(&thresh) {
+            error_out!(
+                "'{}' value need to be within '{}' and '{}'",
+                "--error-threshold".yellow(),
+                "0.0".yellow(),
+                "1.0".yellow()
+            )
         }
+        thresh
+    } else if let Some(thresh) = config {
+        if !(0.0..=1.0).contains(&thresh) {
+            error_out!(
+                "'{}' in '{}' can needs to be within '{}' and '{}'",
+                "error-threshold".yellow(),
+                config_path.yellow(),
+                "0.0".yellow(),
+                "1.0".yellow()
+            );
+        }
+        thresh
+    } else {
+        0.7
     }
 }
 
 fn parse_perturbation(
-    config_name: Option<&str>,
+    config_path: &str,
     args: &[usize],
     config: Option<Vec<usize>>,
 ) -> Option<(usize, usize, usize)> {
@@ -406,7 +366,7 @@ fn parse_perturbation(
             error_out!(
                 "'{}' in '{}' can only have '{}' elements: '{}'",
                 "perturbation".yellow(),
-                config_name.unwrap().yellow(),
+                config_path.yellow(),
                 "three".yellow(),
                 "[TOP_N, DUPLICATES, ROUNDS]".yellow(),
             );

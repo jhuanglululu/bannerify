@@ -18,3 +18,24 @@ pub fn mean_2d<const SIZE: usize, const DIM: usize>(input: &[[f32; SIZE]; DIM]) 
     }
     means
 }
+
+#[inline]
+pub fn sqaure_mean<const SIZE: usize>(input: &[f32; SIZE]) -> f32 {
+    let mut square_sum = f32x8::ZERO;
+    for idx in (0..SIZE).step_by(8) {
+        let vals = f32x8::from(&input[idx..idx + 8]);
+        square_sum += vals * vals;
+    }
+    square_sum.reduce_add() / SIZE as f32
+}
+
+#[inline]
+pub fn square_mean_2d<const SIZE: usize, const DIM: usize>(
+    input: &[[f32; SIZE]; DIM],
+) -> [f32; DIM] {
+    let mut square_means = [0.0_f32; DIM];
+    for dim in 0..DIM {
+        square_means[dim] = sqaure_mean(&input[dim]);
+    }
+    square_means
+}

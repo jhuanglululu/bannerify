@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::mem::MaybeUninit;
+
 use std::ops::Range;
 
 use fast_image_resize::{ResizeOptions, Resizer};
@@ -11,6 +11,7 @@ use wide::f32x8;
 use crate::geometry::*;
 use crate::lab::rgb_to_lab;
 use crate::logger::{error, error_out};
+use crate::macros::uninit;
 
 const HOLLOW_X8_LEN: usize = HOLLOW_BLOCK_PIXELS / 8;
 
@@ -77,7 +78,6 @@ pub struct Blocks {
     pub hollow: Vec<HollowBlock>,
 }
 
-#[allow(clippy::uninit_vec, clippy::uninit_assumed_init, invalid_value)]
 pub fn load_blocks(excludes: &mut HashSet<String>) -> Blocks {
     let img_ids: Vec<_> = BlockImages::iter()
         .filter_map(|p| {
@@ -97,13 +97,8 @@ pub fn load_blocks(excludes: &mut HashSet<String>) -> Blocks {
     }
 
     let length = img_ids.len();
-    let mut pixels: Vec<[u8; 3 * BLOCK_PIXELS]> = Vec::with_capacity(length);
-    let mut hollow: Vec<HollowBlock> = Vec::with_capacity(length);
-
-    unsafe {
-        pixels.set_len(length);
-        hollow.set_len(length);
-    }
+    let mut pixels: Vec<[u8; 3 * BLOCK_PIXELS]> = uninit!(length);
+    let mut hollow: Vec<HollowBlock> = uninit!(length);
 
     (
         img_ids.par_iter(),
@@ -137,8 +132,7 @@ pub fn load_blocks(excludes: &mut HashSet<String>) -> Blocks {
 
             // build a hollow image
 
-            let mut hollow_rgb: [[f32; HOLLOW_BLOCK_PIXELS]; 3] =
-                unsafe { MaybeUninit::uninit().assume_init() };
+            let mut hollow_rgb: [[f32; HOLLOW_BLOCK_PIXELS]; 3] = uninit!();
 
             const TOP_RANGE: Range<usize> = 0..PAD_TOP * BLOCK_SIDE;
             for px_idx in TOP_RANGE {

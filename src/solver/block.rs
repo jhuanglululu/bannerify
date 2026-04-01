@@ -1,13 +1,11 @@
-use std::mem::MaybeUninit;
-
 use rayon::prelude::*;
 use wide::f32x8;
 
 use crate::block::{BOTTOM_MASK, Blocks, MIDDLE_MASK, TOP_MASK};
 use crate::geometry::*;
 use crate::lab::rgb_to_lab;
+use crate::macros::uninit;
 
-#[allow(clippy::uninit_assumed_init, invalid_value)]
 pub fn match_blocks(
     image: &[Vec<u8>; 3],
     dimension: (usize, usize), // (row, col)
@@ -27,8 +25,7 @@ pub fn match_blocks(
             let mut best = 0;
             let mut min_err: f32 = f32::INFINITY;
 
-            let mut tar_hollow: [[f32x8; HOLLOW_BLOCK_PIXELS / 8]; 3] =
-                unsafe { MaybeUninit::uninit().assume_init() };
+            let mut tar_hollow: [[f32x8; HOLLOW_BLOCK_PIXELS / 8]; 3] = uninit!();
 
             let mask = if row == 0 {
                 TOP_MASK
@@ -63,7 +60,6 @@ pub fn match_blocks(
         .collect()
 }
 
-#[allow(clippy::uninit_assumed_init, invalid_value)]
 fn extract_hollow_lab(
     image: &[Vec<u8>; 3],
     tar_buf: &mut [[f32x8; HOLLOW_BLOCK_PIXELS / 8]; 3],
@@ -71,8 +67,7 @@ fn extract_hollow_lab(
     row: usize,
     col: usize,
 ) {
-    let mut hollow_rgb: [[f32; HOLLOW_BLOCK_PIXELS]; 3] =
-        unsafe { MaybeUninit::uninit().assume_init() };
+    let mut hollow_rgb: [[f32; HOLLOW_BLOCK_PIXELS]; 3] = uninit!();
 
     let col_offset = col * BLOCK_SIDE;
 

@@ -1,19 +1,16 @@
 use wide::f32x8;
 
 use crate::banner::{Banner, BannerResult, PrefixPatternCache};
-use crate::color::{COLORS_F32, COLORS_WSQ_SUM, W_PERCEPTUAL};
-use crate::solver::next_layer::next_layer;
+use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::macros::uninit;
+use crate::solver::build::build_prefix;
 
-#[allow(
-    clippy::uninit_vec,
-    clippy::needless_range_loop,
-    clippy::uninit_assumed_init
-)]
-pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
-    banner: &Banner<HW, HW_DIV_8>,
+#[allow(clippy::needless_range_loop)]
+pub fn intial_fill<const HW: usize>(
+    banner: &Banner<HW>,
     patterns: &[[f32; HW]],
     alpha2: &[f32],
-) -> (BannerResult, PrefixPatternCache<HW>) {
+) -> (BannerResult, Vec<PrefixPatternCache<HW>>) {
     let mut base = 0;
     {
         let mut min_base_err = f32::INFINITY;
@@ -35,7 +32,7 @@ pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
             n2t[ch_idx] = -2.0_f32 * n2t_acc.reduce_add();
         }
 
-        for &c_idx in &banner.color_candidates {
+        for c_idx in 0..NUM_COLORS {
             let color = COLORS_F32[c_idx];
             let r = color[0];
             let g = color[1];
@@ -54,16 +51,11 @@ pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
     }
 
     let mut b_patterns = Vec::with_capacity(banner.n_layers);
-    let mut prefix_cache: Vec<(usize, usize, [[f32; HW]; 3])> =
-        Vec::with_capacity(banner.n_layers + 1);
+    let mut prefixes: Vec<(usize, usize, [[f32; HW]; 3])> = uninit!(banner.n_layers);
 
-    unsafe {
-        prefix_cache.set_len(banner.n_layers + 1);
-    }
-
-    prefix_cache[0].2[0] = [COLORS_F32[base][0]; HW];
-    prefix_cache[0].2[1] = [COLORS_F32[base][1]; HW];
-    prefix_cache[0].2[2] = [COLORS_F32[base][2]; HW];
+    prefixes[0].2[0] = [COLORS_F32[base][0]; HW];
+    prefixes[0].2[1] = [COLORS_F32[base][1]; HW];
+    prefixes[0].2[2] = [COLORS_F32[base][2]; HW];
 
     for layer in 0..banner.n_layers {
         let mut best: (usize, usize) = (0, 0);
@@ -82,7 +74,7 @@ pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
                     let alp = f32x8::from(&pattern[px..px + 8]);
                     let inv_alp = f32x8::ONE - alp;
 
-                    let pre_px = f32x8::from(&prefix_cache[layer].2[ch_idx][px..px + 8]);
+                    let pre_px = f32x8::from(&prefixes[layer].2[ch_idx][px..px + 8]);
                     let tar_px = f32x8::from(&banner.target[ch_idx][px..px + 8]);
                     let res = pre_px * inv_alp - tar_px;
 
@@ -94,7 +86,7 @@ pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
                 res_2a[ch_idx] = 2.0_f32 * res_a_acc.reduce_add();
             }
 
-            for &c_idx in &banner.color_candidates {
+            for c_idx in 0..NUM_COLORS {
                 let r = COLORS_F32[c_idx][0];
                 let g = COLORS_F32[c_idx][1];
                 let b = COLORS_F32[c_idx][2];
@@ -113,8 +105,12 @@ pub fn initial_fill_greedy<const HW: usize, const HW_DIV_8: usize>(
         }
 
         b_patterns.push(best);
-        next_layer(patterns, &mut prefix_cache, layer, best.0, best.1);
+
+        let (left, right) = prefixes.split_at_mut(layer + 1);
+        if layer != banner.n_layers - 1 {
+            build_prefix(patterns, &left[layer], &mut right[0], best.0, best.1);
+        }
     }
 
-    (BannerResult::new(base, b_patterns), prefix_cache)
+    (BannerResult::new(base, b_patterns), prefixes)
 }

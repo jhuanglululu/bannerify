@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use config::OptimalEnum;
-
 pub mod config;
 
 #[derive(clap::Parser)]
@@ -41,12 +39,12 @@ pub struct Args {
 
     /// Pattern ids to exclude (comma-separated)
     #[arg(help_heading = "Generation")]
-    #[arg(short = 'E', long, value_name = "PATTERNS")]
+    #[arg(short = 'P', long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
     /// Block ids to exclude (comma-separated)
     #[arg(help_heading = "Generation")]
-    #[arg(short = 'E', long, value_name = "BLOCKS")]
+    #[arg(short = 'B', long, value_name = "BLOCKS")]
     pub exclude_blocks: Option<String>,
 
     /// Layer Range: [MIN MAX] [default: 4 6]
@@ -54,15 +52,25 @@ pub struct Args {
     #[arg(short = 'L', long, num_args = 2, value_names = ["MIN", "MAX"])]
     pub layer_range: Vec<usize>,
 
-    /// Color Range: [MIN MAX] [default: 4 6]
-    #[arg(help_heading = "Generation")]
-    #[arg(short = 'C', long, num_args = 2, value_names = ["MIN", "MAX"])]
-    pub color_range: Vec<usize>,
+    /// Refinement pass count: [default: 2]
+    #[arg(help_heading = "Refinement")]
+    #[arg(short = 'R', long, value_names = ["COUNT"])]
+    pub refinement_pass: Option<usize>,
 
-    /// Use optimal algorithm for
-    #[arg(help_heading = "Generation")]
-    #[arg(short = 'O', long, num_args = 0.., value_enum, value_name = "STAGE")]
-    pub optimal: Vec<OptimalEnum>,
+    /// Refinement window size: [default: 2]
+    #[arg(help_heading = "Refinement")]
+    #[arg(short = 'k', long, value_names = ["SIZE"])]
+    pub window_size: Option<usize>,
+
+    /// Refinement error threshold for refinement passes (0.0 to 1.0): [default: 0.7]
+    #[arg(help_heading = "Refinement")]
+    #[arg(short = 'E', long, value_name = "THRESHOLD")]
+    pub error_threshold: Option<f32>,
+
+    /// Refinement max candidate: [default: 5]
+    #[arg(help_heading = "Refinement")]
+    #[arg(short = 'C', long, value_name = "NUMBER_OF_CANDIDATES")]
+    pub refine_candidate: Option<usize>,
 
     /// Perturbation search: [TOP_N, DUPLICATES, ROUNDS]
     #[arg(help_heading = "Generation")]

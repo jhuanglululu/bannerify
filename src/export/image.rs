@@ -4,8 +4,8 @@ use rayon::prelude::*;
 
 use crate::geometry::*;
 use crate::logger::error_out;
+use crate::macros::uninit;
 
-#[allow(clippy::uninit_vec)]
 pub fn banner_to_buffer(
     block_assets: &[[u8; 3 * BLOCK_PIXELS]],
     dimension: (usize, usize), // (row, col)
@@ -15,10 +15,7 @@ pub fn banner_to_buffer(
 ) -> Vec<u8> {
     let px_count = BLOCK_PIXELS * (dimension.0 + 1) * dimension.1;
     let last_banner_pixel_row = BLOCK_SIDE * (dimension.0 + 1) - PAD_BOTTOM;
-    let mut buffer = Vec::with_capacity(3 * px_count);
-    unsafe {
-        buffer.set_len(3 * px_count);
-    }
+    let mut buffer = uninit!(3 * px_count);
 
     let line_per_row = BLOCK_SIDE * dimension.1;
 

@@ -19,12 +19,12 @@ pub fn split_image(
 }
 
 /// extract one row of banner
-fn extract_banners_row<const HW: usize, const HW_DIV_8: usize>(
+fn extract_banners_row<const HW: usize>(
     image: &[Vec<u8>; 3],
     img_width: usize,
     num_col: usize,
     y_offset: usize,
-) -> Vec<Banner<HW, HW_DIV_8>> {
+) -> Vec<Banner<HW>> {
     let mut pixels: Vec<_> = (0..num_col)
         .map(|_| unsafe { Box::<[[f32; HW]; 3]>::new_uninit().assume_init() })
         .collect();

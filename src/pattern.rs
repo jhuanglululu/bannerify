@@ -7,6 +7,7 @@ use wide::f32x8;
 
 use crate::geometry::*;
 use crate::logger::{error, error_out};
+use crate::macros::uninit;
 
 #[derive(Embed)]
 #[folder = "assets/banners/"]
@@ -45,17 +46,10 @@ pub fn load_patterns(excludes: &mut HashSet<String>) -> Patterns {
     }
 
     let length = pattern_ids.len();
-    let mut alphas: Vec<[f32; TOP_HW]> = Vec::with_capacity(length);
-    let mut ntop_alphas: Vec<[f32; NTOP_HW]> = Vec::with_capacity(length);
-    let mut alpha_square = Vec::with_capacity(length);
-    let mut ntop_alpha_square = Vec::with_capacity(length);
-
-    unsafe {
-        alphas.set_len(length);
-        ntop_alphas.set_len(length);
-        alpha_square.set_len(length);
-        ntop_alpha_square.set_len(length);
-    }
+    let mut alphas: Vec<[f32; TOP_HW]> = uninit!(length);
+    let mut ntop_alphas: Vec<[f32; NTOP_HW]> = uninit!(length);
+    let mut alpha_square = uninit!(length);
+    let mut ntop_alpha_square = uninit!(length);
 
     (
         pattern_ids.par_iter(),

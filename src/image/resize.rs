@@ -4,6 +4,7 @@ use image::RgbImage;
 use crate::cli::config::{Dimension, ResizingMethod};
 use crate::geometry::*;
 use crate::logger::error_out;
+use crate::macros::uninit;
 
 pub fn resize_image(
     source: &RgbImage,
@@ -17,15 +18,9 @@ pub fn resize_image(
     };
 
     let ch_len = img_interleaved.len() / 3;
-    let mut r = Vec::with_capacity(ch_len);
-    let mut g = Vec::with_capacity(ch_len);
-    let mut b = Vec::with_capacity(ch_len);
-
-    unsafe {
-        r.set_len(ch_len);
-        g.set_len(ch_len);
-        b.set_len(ch_len);
-    }
+    let mut r = uninit!(ch_len);
+    let mut g = uninit!(ch_len);
+    let mut b = uninit!(ch_len);
 
     for (px_idx, px) in img_interleaved.chunks_exact(3).enumerate() {
         r[px_idx] = px[0];

@@ -5,10 +5,12 @@ use crate::cli::config::Config;
 use crate::geometry::*;
 use crate::logger::info;
 use crate::logger::profiler::timed;
+use crate::macros::uninit;
 use crate::pattern::Patterns;
+use crate::solver::build::build_prefix;
 use crate::solver::complexity::sort_banner;
-use crate::solver::greedy::initial_fill::initial_fill_greedy;
-use crate::solver::optimal::initial_fill::initial_fill_optimal;
+use crate::solver::fill::intial_fill;
+use crate::solver::refine::refinement_pass;
 
 pub fn process_banners(
     config: &Config,
@@ -20,60 +22,68 @@ pub fn process_banners(
     Vec<PrefixPatternCache<TOP_HW>>,
     Vec<PrefixPatternCache<NTOP_HW>>,
 ) {
-    let optimal_option = config.optimal;
-    let has_greedy = optimal_option.has_greedy();
-
-    let complexity = config.complexity;
-
-    let mut layer_dist = vec![0; complexity.layers.1 - complexity.layers.0 + 1];
-    let mut color_dist = vec![0; complexity.colors.1 - complexity.colors.0 + 1];
-    sort_banner(
-        &mut top_banners,
-        &complexity,
-        &mut layer_dist,
-        &mut color_dist,
-    );
-    sort_banner(
-        &mut ntop_banners,
-        &complexity,
-        &mut layer_dist,
-        &mut color_dist,
-    );
+    let mut layer_dist = vec![0; config.n_layers.1 - config.n_layers.0 + 1];
+    sort_banner(&mut top_banners, config.n_layers, &mut layer_dist);
+    sort_banner(&mut ntop_banners, config.n_layers, &mut layer_dist);
     timed!("banners sorted");
     info!(
         "layer distribution: {}",
-        format_distrbution(complexity.layers.0, layer_dist)
+        format_distrbution(config.n_layers.0, layer_dist)
     );
-    if has_greedy {
-        info!(
-            "color distribution: {}",
-            format_distrbution(complexity.colors.0, color_dist)
-        );
-    }
 
     let (mut top_results, top_cache): (Vec<_>, Vec<_>) = top_banners
         .into_par_iter()
         .map(|tb| {
-            if optimal_option.initial {
-                initial_fill_optimal(&tb, &patterns.alphas, &patterns.alpha_square)
-            } else {
-                initial_fill_greedy(&tb, &patterns.alphas, &patterns.alpha_square)
-            }
+            let (mut result, mut prefixes) =
+                intial_fill(&tb, &patterns.alphas, &patterns.alpha_square);
+
+            let suffixes = refinement_pass(
+                &tb,
+                &mut result,
+                &mut prefixes,
+                &config.refinement,
+                &patterns.alphas,
+            );
+
+            let mut last_layer: PrefixPatternCache<TOP_HW> = uninit!();
+            build_prefix(
+                &patterns.alphas,
+                &prefixes[tb.n_layers - 1],
+                &mut last_layer,
+                result.patterns.last().unwrap().0,
+                result.patterns.last().unwrap().1,
+            );
+
+            (result, last_layer)
         })
         .unzip();
 
     let (mut ntop_results, ntop_cache): (Vec<_>, Vec<_>) = ntop_banners
         .into_par_iter()
         .map(|ntb| {
-            if optimal_option.initial {
-                initial_fill_optimal(&ntb, &patterns.ntop_alphas, &patterns.ntop_alpha_square)
-            } else {
-                initial_fill_greedy(&ntb, &patterns.ntop_alphas, &patterns.ntop_alpha_square)
-            }
+            let (mut result, mut prefixes) =
+                intial_fill(&ntb, &patterns.ntop_alphas, &patterns.ntop_alpha_square);
+
+            let suffixes = refinement_pass(
+                &ntb,
+                &mut result,
+                &mut prefixes,
+                &config.refinement,
+                &patterns.ntop_alphas,
+            );
+
+            let mut last_layer: PrefixPatternCache<NTOP_HW> = uninit!();
+            build_prefix(
+                &patterns.ntop_alphas,
+                &prefixes[ntb.n_layers - 1],
+                &mut last_layer,
+                result.patterns.last().unwrap().0,
+                result.patterns.last().unwrap().1,
+            );
+            (result, last_layer)
         })
         .unzip();
 
-    timed!("temp(initial fill)");
     top_results.append(&mut ntop_results);
     (top_results, top_cache, ntop_cache)
 }

@@ -1,6 +1,8 @@
+#![allow(dead_code, unused_variables)]
 use crate::block::load_blocks;
 use crate::cli::Args;
 use crate::cli::config::Config;
+use crate::export::export_to_html;
 use crate::image::load_image;
 use crate::image::resize::resize_image;
 use crate::image::split::split_image;
@@ -8,7 +10,6 @@ use crate::logger::info;
 use crate::logger::profiler::{finish_profiling, init_profiler, timed};
 use crate::pattern::load_patterns;
 use crate::solver::block::match_blocks;
-use crate::solver::optimal::export;
 use crate::solver::pipeline::process_banners;
 use clap::Parser;
 
@@ -23,6 +24,7 @@ mod geometry;
 mod image;
 mod lab;
 mod logger;
+mod macros;
 mod math;
 mod pattern;
 mod solver;
@@ -68,7 +70,7 @@ fn main() {
     let matched_block = match_blocks(&resized_image, (row, col), &blocks);
     timed!("block matched");
 
-    export(
+    export_to_html(
         &config.output,
         (row, col),
         &blocks.pixels,

@@ -28,7 +28,6 @@ const D65_REF_WHITE: [f32x8; 3] = [
 ];
 
 #[inline]
-#[allow(dead_code)]
 pub fn rgb_to_lab(r: &[f32], g: &[f32], b: &[f32]) -> (f32x8, f32x8, f32x8) {
     let lin_r = f32x8::from(std::array::from_fn(|i| LINEARIZE_TABLE[r[i] as usize]));
     let lin_g = f32x8::from(std::array::from_fn(|i| LINEARIZE_TABLE[g[i] as usize]));

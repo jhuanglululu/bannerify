@@ -70,7 +70,6 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Default, Copy, Clone)]
 pub struct PeakAlloc;
 
-#[allow(dead_code)]
 impl PeakAlloc {
     /// Returns the number of bytes that are currently allocated to the process
     pub fn current_usage(&self) -> usize {
