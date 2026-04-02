@@ -70,7 +70,7 @@ pub struct Args {
     /// Refinement max candidate: [default: 5]
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'C', long, value_name = "NUMBER_OF_CANDIDATES")]
-    pub refine_candidate: Option<usize>,
+    pub refinement_candidate: Option<usize>,
 
     /// Perturbation search: [TOP_N, DUPLICATES, ROUNDS]
     #[arg(help_heading = "Generation")]

@@ -1,2 +1,55 @@
 # This is the default config for bannerify
 # Read readme for more details on the options
+
+# default is blank, put a number if you want to limit the workers
+# keeping it blank is the most performance option
+# workers =
+
+# * Resizing Methods *
+
+# scales up the image until the canva is fully covered
+# corners and edges of the image will be cut off
+fit = true
+
+# stretch the image until the canva is fully covered
+# the aspect ratio of the image and the banners will not be the same
+stretch = false
+
+# fill the empty space with COLOR
+# allowed formats: '#ff9453', 'rgb(114, 5, 14)', '9,4,87'
+# fill = COLOR
+
+# * Generation Options *
+
+# patterns in the list will not be used
+exclude_patterns = []
+
+# blocks in the list will not be used when generating background
+exclude_blocks = []
+
+# MIN and MAX number of layers that a banner can have
+# simpler image chunks will use less layers
+layer_range = [4, 6]
+
+# not yet added
+# pub perturbations: Option<Vec<usize>>,
+# pub lab_refine: Option<usize>,
+
+# * Refinement Options *
+
+# number of pass that refinement can try
+# setting this number above 3 will most likely do nothing
+refinement_pass = 2
+
+# number of layers that are 'adjusted' at once during refinement
+# higher number will produce better result, but will take more time
+# the sweet spot for this setting is 2 or 3
+window_size = 2
+
+# threshold for passing candidates
+# setting it to 1.0 will only use the best candidate and
+# 0.0 will use all the candidates
+error_threshold = 0.7
+
+# maximum number of candidate that can survive
+refine_candidate = 5

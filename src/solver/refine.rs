@@ -63,7 +63,7 @@ fn refine_window<const HW: usize>(
     config: &RefinementConfig,
     patterns: &[[f32; HW]],
 ) {
-    let cand_size = config.refine_candidate;
+    let cand_size = config.refinement_candidate;
     let target = &banner.target;
 
     let mut curr_cand: Vec<Candidate<HW>> =

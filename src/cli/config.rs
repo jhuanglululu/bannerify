@@ -34,7 +34,7 @@ pub struct ConfigToml {
     pub refinement_pass: Option<usize>,
     pub window_size: Option<usize>,
     pub error_threshold: Option<f32>,
-    pub refine_candidate: Option<usize>,
+    pub refinement_candidate: Option<usize>,
     pub perturbations: Option<Vec<usize>>,
     pub lab_refine: Option<usize>,
 }
@@ -56,7 +56,7 @@ pub struct RefinementConfig {
     pub refinement_pass: usize,
     pub window_size: usize,
     pub error_threshold: f32,
-    pub refine_candidate: usize,
+    pub refinement_candidate: usize,
 }
 
 impl From<Args> for Config {
@@ -142,9 +142,9 @@ impl From<Args> for Config {
                     args.error_threshold,
                     config.error_threshold,
                 ),
-                refine_candidate: args
-                    .refine_candidate
-                    .or(config.refine_candidate)
+                refinement_candidate: args
+                    .refinement_candidate
+                    .or(config.refinement_candidate)
                     .unwrap_or(5),
             },
             perturbations: parse_perturbation(
