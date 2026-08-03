@@ -45,11 +45,17 @@ struct Coeffs {
     weights: Vec<f32>,
 }
 
-/// Compute the lanczos-3 coefficients mapping `in_size` samples to `out_size`.
-fn coeffs(in_size: usize, out_size: usize) -> Coeffs {
+/// Compute the lanczos-3 coefficients mapping the source interval
+/// `[in0, in1)` — in fractional source-pixel coordinates — onto `out_size`
+/// output samples.
+///
+/// The interval is Pillow's `box`: cropping is expressed here, in the weight
+/// table, so a crop never costs a materialised sub-image.
+fn coeffs(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Coeffs {
     assert!(in_size > 0 && out_size > 0, "resample: zero-sized axis");
+    assert!(in1 > in0, "resample: empty source window");
 
-    let scale = in_size as f64 / out_size as f64;
+    let scale = (in1 - in0) / out_size as f64;
     let filter_scale = scale.max(1.0);
     let support = A * filter_scale;
     let ksize = (support.ceil() as usize) * 2 + 1;
@@ -58,9 +64,10 @@ fn coeffs(in_size: usize, out_size: usize) -> Coeffs {
     let mut weights = vec![0.0f32; out_size * ksize];
 
     for out in 0..out_size {
-        let center = (out as f64 + 0.5) * scale;
-        let xmin = ((center - support + 0.5).floor().max(0.0)) as usize;
-        let xmax = (((center + support + 0.5).floor() as usize) - xmin).min(in_size - xmin);
+        let center = in0 + (out as f64 + 0.5) * scale;
+        let xmin = ((center - support + 0.5).floor().max(0.0) as usize).min(in_size - 1);
+        let xmax = (((center + support + 0.5).floor().max(0.0) as usize).min(in_size))
+            .saturating_sub(xmin);
         let xmax = xmax.min(ksize).max(1);
 
         let mut sum = 0.0f64;
@@ -104,9 +111,10 @@ pub struct HWeights {
 }
 
 impl HWeights {
-    /// Build the table for `in_size` → `out_size`.
-    pub fn new(in_size: usize, out_size: usize) -> Self {
-        let c = coeffs(in_size, out_size);
+    /// Build the table mapping the source interval `[in0, in1)` of an axis of
+    /// `in_size` samples onto `out_size` output pixels.
+    pub fn new(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Self {
+        let c = coeffs(in_size, in0, in1, out_size);
         let win = round_up(c.ksize + LANES - 1, LANES);
         // `zeroed`, not `new_uninit`: the padding entries must read as 0 and the
         // table is small (out_len * win floats), not an image-sized buffer.
@@ -157,9 +165,10 @@ pub struct VWeights {
 }
 
 impl VWeights {
-    /// Build the table for `in_size` → `out_size`.
-    pub fn new(in_size: usize, out_size: usize) -> Self {
-        let c = coeffs(in_size, out_size);
+    /// Build the table mapping the source interval `[in0, in1)` of an axis of
+    /// `in_size` samples onto `out_size` output rows.
+    pub fn new(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Self {
+        let c = coeffs(in_size, in0, in1, out_size);
         Self {
             out_len: out_size,
             ksize: c.ksize,

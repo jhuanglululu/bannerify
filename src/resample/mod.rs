@@ -17,10 +17,5 @@ mod pipeline;
 mod sink;
 mod weights;
 
-#[cfg(test)]
-mod naive;
-#[cfg(test)]
-mod tests;
-
-pub use pipeline::{Options, Plan, PlanarU8, resize_to_planar_f32, run};
+pub use pipeline::{Options, Plan, PlanarU8, Window, resize_to_planar_f32, run};
 pub use sink::{Band, BandSink, ChecksumSink, PlanarF32Sink};

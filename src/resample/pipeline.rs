@@ -42,6 +42,34 @@ impl PlanarU8 {
     }
 }
 
+/// A rectangular source region, in fractional source-pixel coordinates.
+///
+/// This is Pillow's `box`: it is applied inside the weight tables, so cropping
+/// costs nothing and never materialises a sub-image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    /// Left edge.
+    pub x0: f64,
+    /// Top edge.
+    pub y0: f64,
+    /// Right edge (exclusive).
+    pub x1: f64,
+    /// Bottom edge (exclusive).
+    pub y1: f64,
+}
+
+impl Window {
+    /// The whole `width × height` image.
+    pub fn full(width: usize, height: usize) -> Self {
+        Self {
+            x0: 0.0,
+            y0: 0.0,
+            x1: width as f64,
+            y1: height as f64,
+        }
+    }
+}
+
 /// Tuning knobs for a resize.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -72,7 +100,8 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Build the plan for `src_width × src_height` → `dst_width × dst_height`.
+    /// Build the plan for the whole `src_width × src_height` source →
+    /// `dst_width × dst_height`.
     pub fn new(
         src_width: usize,
         src_height: usize,
@@ -80,9 +109,28 @@ impl Plan {
         dst_height: usize,
         opts: Options,
     ) -> Self {
+        Self::with_window(
+            src_width,
+            src_height,
+            Window::full(src_width, src_height),
+            dst_width,
+            dst_height,
+            opts,
+        )
+    }
+
+    /// Build the plan for the source region `window` → `dst_width × dst_height`.
+    pub fn with_window(
+        src_width: usize,
+        src_height: usize,
+        window: Window,
+        dst_width: usize,
+        dst_height: usize,
+        opts: Options,
+    ) -> Self {
         assert!(opts.band_rows > 0, "band_rows must be positive");
-        let h = HWeights::new(src_width, dst_width);
-        let v = VWeights::new(src_height, dst_height);
+        let h = HWeights::new(src_width, window.x0, window.x1, dst_width);
+        let v = VWeights::new(src_height, window.y0, window.y1, dst_height);
         let src_stride = h.src_padded_len(src_width);
         Self {
             src_width,
