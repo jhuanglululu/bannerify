@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    println!("bannerify: CLI not implemented yet");
 }
