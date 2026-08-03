@@ -5,12 +5,14 @@
 //! step, so there is no `resize` subcommand: the user names a wall size in
 //! banner rows or columns and the pipeline does the rest.
 //!
-//! Options under "Generation" and "Refinement" are parsed and validated now but
-//! do nothing until the phase-2 solver lands; their help text says so.
+//! `--exclude-patterns` and `--layer-range` are live as of solver stage 2a; the
+//! remaining "Generation" and "Refinement" options are parsed and validated now
+//! but do nothing until stage 2b lands, and their help text says so.
 //!
 //! `--debug` is logging only: per-stage timings and memory, no file dumping.
 //! While the pipeline is partial the tool's normal output is the current step's
-//! intermediate, so there is nothing extra to dump.
+//! intermediate, so there is nothing extra to dump: today `<OUTPUT>` is the
+//! composed banner wall and `<OUTPUT>.jsonl` the per-cell solution.
 
 use std::path::PathBuf;
 
@@ -31,7 +33,9 @@ pub struct Args {
     /// Input image path
     pub input: PathBuf,
     /// Output path (an HTML export once the pipeline is complete; for now it
-    /// receives this phase's intermediate: the resized wall as a PNG)
+    /// receives this stage's intermediates: the composed banner wall as a PNG,
+    /// and the per-cell solution as JSONL at the same path with a .jsonl
+    /// extension)
     pub output: PathBuf,
 
     /// Height of output in blocks (number of banner rows + 1)
@@ -66,47 +70,49 @@ pub struct Args {
     #[arg(long, value_name = "COLOR")]
     pub fill: Option<String>,
 
-    /// Pattern ids to exclude (comma-separated) [inert until phase 2]
+    /// Pattern ids to exclude (comma-separated), e.g. 'globe,mojang'; the
+    /// solver never lays an excluded pattern
     #[arg(help_heading = "Generation")]
     #[arg(short = 'P', long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
-    /// Block ids to exclude (comma-separated) [inert until phase 2]
+    /// Block ids to exclude (comma-separated) [inert until phase 3]
     #[arg(help_heading = "Generation")]
     #[arg(short = 'B', long, value_name = "BLOCKS")]
     pub exclude_blocks: Option<String>,
 
-    /// Layer Range: [MIN MAX] [default: 4 6] [inert until phase 2]
+    /// Layer Range: [MIN MAX] [default: 4 6]; flat cells get MIN layers, the
+    /// busiest cell of the wall gets MAX
     #[arg(help_heading = "Generation")]
     #[arg(short = 'L', long, num_args = 2, value_names = ["MIN", "MAX"])]
     pub layer_range: Vec<usize>,
 
-    /// Perturbation search: [TOP_N, DUPLICATES, ROUNDS] [inert until phase 2]
+    /// Perturbation search: [TOP_N, DUPLICATES, ROUNDS] [inert until stage 2b]
     #[arg(help_heading = "Generation")]
     #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
 
-    /// Enable perceptual (OKLab) refinement pass [inert until phase 2]
+    /// Enable perceptual (OKLab) refinement pass [inert until stage 2b]
     #[arg(help_heading = "Generation")]
     #[arg(short = 'l', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub lab_refine: Option<usize>,
 
-    /// Refinement pass count: [default: 2] [inert until phase 2]
+    /// Refinement pass count: [default: 2] [inert until stage 2b]
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]
     pub refinement_pass: Option<usize>,
 
-    /// Refinement window size: [default: 2] [inert until phase 2]
+    /// Refinement window size: [default: 2] [inert until stage 2b]
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'k', long, value_names = ["SIZE"])]
     pub window_size: Option<usize>,
 
-    /// Refinement error threshold for refinement passes (0.0 to 1.0): [default: 0.7] [inert until phase 2]
+    /// Refinement error threshold for refinement passes (0.0 to 1.0): [default: 0.7] [inert until stage 2b]
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'E', long, value_name = "THRESHOLD")]
     pub error_threshold: Option<f32>,
 
-    /// Refinement max candidate: [default: 5] [inert until phase 2]
+    /// Refinement max candidate: [default: 5] [inert until stage 2b]
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'C', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub refinement_candidate: Option<usize>,

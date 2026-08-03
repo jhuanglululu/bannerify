@@ -1,0 +1,89 @@
+//! The banner solver: which dyes and patterns approximate each cell.
+//!
+//! See `context/plans/2-solver.md`. **Stage 2a** — this module — is the greedy
+//! fill and the two intermediates that make it checkable: the composed preview
+//! image and a JSONL dump of every cell's decision. Windowed refinement,
+//! perturbation rounds and the OKLab pass are stage 2b and land here alongside
+//! [`greedy`].
+//!
+//! - [`variance`] — the pre-pass that hands each cell a layer budget.
+//! - [`greedy`] — the fill itself, and the reusable [`Workspace`].
+//! - [`cell`] — getting a cell's pixels out of a row band and its composite
+//!   back into the preview strip.
+
+use std::io::{BufWriter, Write};
+use std::path::Path;
+
+use colored::Colorize;
+
+use crate::color::COLOR_NAMES;
+use crate::logger::error_out;
+use crate::pattern::Patterns;
+
+pub mod cell;
+pub mod greedy;
+pub mod variance;
+
+pub use greedy::{Solution, Workspace};
+
+/// Write one JSONL line per cell: `{"row","col","base","layers","error"}`.
+///
+/// `rows[r][c]` is cell `(r, c)`. Written serially after the `par_iter`, from
+/// the collected results — the row items never touch a file.
+///
+/// Hand-formatted rather than pulling in `serde_json` for five fields: dye and
+/// pattern ids are `[a-z0-9_]` by construction (asserted below), so no string
+/// in the output needs escaping, and the floats are printed with `{:.6}`.
+pub fn write_jsonl(path: &Path, patterns: &Patterns, rows: &[Vec<Solution>]) {
+    debug_assert!(
+        patterns
+            .names
+            .iter()
+            .map(String::as_str)
+            .chain(COLOR_NAMES)
+            .all(|n| n.chars().all(|c| c.is_ascii_lowercase() || c == '_')),
+        "ids must need no JSON escaping"
+    );
+
+    let file = std::fs::File::create(path).unwrap_or_else(|e| {
+        error_out!(
+            "could not write '{}': {}",
+            path.display().to_string().yellow(),
+            e.to_string().red()
+        );
+    });
+    let mut out = BufWriter::new(file);
+
+    let mut write = || -> std::io::Result<()> {
+        let mut line = String::with_capacity(256);
+        for (r, row) in rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                line.clear();
+                line.push_str(&format!(
+                    "{{\"row\":{},\"col\":{},\"base\":\"{}\",\"layers\":[",
+                    r, c, COLOR_NAMES[cell.base]
+                ));
+                for (i, &(p, dye)) in cell.layers.iter().enumerate() {
+                    if i > 0 {
+                        line.push(',');
+                    }
+                    line.push_str(&format!(
+                        "[\"{}\",\"{}\"]",
+                        patterns.names[p], COLOR_NAMES[dye]
+                    ));
+                }
+                line.push_str(&format!("],\"error\":{:.6}}}\n", cell.error));
+                out.write_all(line.as_bytes())?;
+            }
+        }
+        out.flush()
+    };
+
+    write().unwrap_or_else(|e| {
+        error_out!(
+            "could not write '{}': {}",
+            path.display().to_string().yellow(),
+            e.to_string().red()
+        );
+    });
+}

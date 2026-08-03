@@ -1,0 +1,158 @@
+//! The banner pattern masks, embedded in the binary and decoded into the
+//! solver's lane-view tables.
+//!
+//! `assets/banners/` holds one 20×40 PNG per Minecraft banner pattern. Only the
+//! **alpha channel** carries information: it is the mask the dye is laid
+//! through, so a pattern contributes `α` of its dye and `1 − α` of whatever is
+//! already composited underneath. The RGB channels of the assets are ignored.
+//!
+//! ## Layout
+//!
+//! A patch — target, prefix composite or pattern mask — is **row-major,
+//! [`BANNER_W`] wide by 40 (or 24) rows tall**, one plane per quantity, i.e.
+//! `index = y * BANNER_W + x`. That is exactly the order the PNG's rows arrive
+//! in and exactly the order [`crate::solver::cell`] gathers target pixels in,
+//! so a pattern plane and a target plane can be zipped lane for lane with no
+//! addressing arithmetic anywhere in the kernels.
+//!
+//! Two variants per pattern, because a banner's top [`HIDDEN_H`] rows are
+//! covered by the banner hanging in front of it:
+//!
+//! - [`Patterns::top`]: the full 20×40 patch ([`TOP_HW`] floats), for banner
+//!   row 0, which nothing covers.
+//! - [`Patterns::lower`]: the bottom 24 rows ([`NTOP_HW`] floats) — the tail of
+//!   the full patch, since the layout is row-major — for every other row. Those
+//!   rows solve only what shows, which is both cheaper and correct; the old
+//!   Python build instead solved the full patch behind an occlusion mask.
+//!
+//! `Σ α²` is precomputed per pattern per variant: it is the `c²` coefficient of
+//! the solver's closed-form dye sweep, constant across cells and layers.
+
+use std::collections::HashSet;
+
+use image::GenericImageView;
+use rayon::prelude::*;
+use rust_embed::Embed;
+
+use crate::geometry::{BANNER_H, BANNER_W, HIDDEN_H, NTOP_HW, TOP_HW};
+use crate::logger::error_out;
+use crate::simd::Chunk;
+
+/// The embedded `assets/banners/` tree.
+#[derive(Embed)]
+#[folder = "assets/banners/"]
+struct PatternAssets;
+
+/// Every pattern the solver may use, decoded into lane-view tables.
+///
+/// Field `i` of every vector describes pattern `names[i]`; the solver only ever
+/// carries the index.
+pub struct Patterns {
+    /// Pattern ids, sorted, in table order.
+    pub names: Vec<String>,
+    /// Full 20×40 alpha patches, for banner row 0.
+    pub top: Vec<Chunk<TOP_HW>>,
+    /// Bottom-24-row alpha patches, for the other banner rows.
+    pub lower: Vec<Chunk<NTOP_HW>>,
+    /// `Σ α²` over [`Patterns::top`].
+    pub top_alpha2: Vec<f32>,
+    /// `Σ α²` over [`Patterns::lower`].
+    pub lower_alpha2: Vec<f32>,
+}
+
+impl Patterns {
+    /// Number of patterns in the table.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether the table is empty (only reachable by excluding everything).
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+/// Decode the embedded patterns, dropping every id in `exclude`.
+///
+/// Decoding is `par_iter` over patterns like the old build — 42 tiny PNGs, but
+/// it is free parallelism on the startup path. An id in `exclude` that names no
+/// pattern is a user mistake, not a silent no-op: it exits with the list.
+pub fn load(exclude: &HashSet<String>) -> Patterns {
+    // rust-embed's iteration order follows the directory walk; sort so the
+    // pattern indices (and therefore every tie-break in the solver) are the
+    // same on every machine and every run.
+    let mut all: Vec<String> = PatternAssets::iter()
+        .filter_map(|p| p.strip_suffix(".png").map(str::to_string))
+        .collect();
+    all.sort_unstable();
+
+    let unknown: Vec<&str> = exclude
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !all.iter().any(|name| name == id))
+        .collect();
+    if !unknown.is_empty() {
+        let mut unknown = unknown;
+        unknown.sort_unstable();
+        error_out!("unknown pattern id(s): {}", unknown.join(", "));
+    }
+
+    let names: Vec<String> = all.into_iter().filter(|id| !exclude.contains(id)).collect();
+    if names.is_empty() {
+        error_out!("every banner pattern was excluded — nothing left to solve with");
+    }
+
+    let decoded: Vec<Chunk<TOP_HW>> = names.par_iter().map(|id| decode(id)).collect();
+
+    let lower: Vec<Chunk<NTOP_HW>> = decoded
+        .iter()
+        .map(|top| {
+            let mut lower = Chunk::<NTOP_HW>::zeroed();
+            lower.copy_from_slice(&top[TOP_HW - NTOP_HW..]);
+            lower
+        })
+        .collect();
+
+    let top_alpha2 = decoded.iter().map(|p| sum_squares(p)).collect();
+    let lower_alpha2 = lower.iter().map(|p| sum_squares(p)).collect();
+
+    Patterns {
+        names,
+        top: decoded,
+        lower,
+        top_alpha2,
+        lower_alpha2,
+    }
+}
+
+/// Decode one embedded PNG into a full-patch alpha plane.
+fn decode(id: &str) -> Chunk<TOP_HW> {
+    let file = PatternAssets::get(&format!("{id}.png"))
+        .unwrap_or_else(|| error_out!("internal error: pattern '{id}' vanished from the binary"));
+    let img = image::load_from_memory_with_format(&file.data, image::ImageFormat::Png)
+        .unwrap_or_else(|e| error_out!("could not decode pattern '{id}': {e}"));
+
+    if img.dimensions() != (BANNER_W as u32, BANNER_H as u32) {
+        error_out!("pattern '{id}' is not {BANNER_W}x{BANNER_H} pixels");
+    }
+
+    const INV_255: f32 = 1.0 / 255.0;
+    let mut out = Chunk::<TOP_HW>::zeroed();
+    for (dst, rgba) in out
+        .iter_mut()
+        .zip(img.into_rgba8().as_raw().chunks_exact(4))
+    {
+        *dst = f32::from(rgba[3]) * INV_255;
+    }
+    out
+}
+
+/// `Σ α²` over a patch. Cold path (once per pattern at startup) — plain scalar.
+fn sum_squares(patch: &[f32]) -> f32 {
+    patch.iter().map(|a| a * a).sum()
+}
+
+/// Rows of a patch that are hidden behind the banner in front of it — the part
+/// [`Patterns::lower`] drops. Kept as a named constant so the `top`/`lower`
+/// split reads the same here as in the geometry module.
+const _: () = assert!(TOP_HW - NTOP_HW == HIDDEN_H * BANNER_W);

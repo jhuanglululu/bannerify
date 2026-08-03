@@ -2,17 +2,19 @@
 //! rows.
 //!
 //! One work item is one banner row (`context/designs/pipeline.md`): the closure
-//! borrows the source planes, the shared weights and the layout, resamples its
-//! own row band locally through the windowed plan, and writes its strip of the
-//! wall canvas — no shared mutable state, no locking, no cross-item handoff.
+//! borrows the source planes, the shared weights, the pattern tables, the layer
+//! grid and the layout, resamples its own row band locally through the windowed
+//! plan, solves its cells against that band, and writes its strip of the wall
+//! canvas — no shared mutable state, no locking, no cross-item handoff.
 //!
-//! Phase 1 stops after the resample, so the tool's normal output is that
-//! intermediate: the resized wall image, written as a PNG to `<OUTPUT>`. When
-//! the solver lands it slots into [`render_row`] between the resample and the
-//! strip write, and this intermediate-output code is deleted rather than kept
-//! behind a flag.
+//! Phase 2 stops after the greedy fill (stage 2a, `context/plans/2-solver.md`),
+//! so the tool's normal output is that intermediate: the composed banner wall as
+//! a PNG at `<OUTPUT>`, plus the per-cell decisions as JSONL beside it. The
+//! resized-image intermediate phase 1 wrote is gone, as planned — earlier
+//! intermediates are deleted when a later stage lands, never kept behind a flag.
 
 use std::ops::Range;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -21,11 +23,16 @@ use rayon::prelude::*;
 
 use crate::cli::Args;
 use crate::cli::config::Config;
-use crate::geometry::banner_row_span;
+use crate::geometry::{NTOP_HW, TOP_HW, banner_row_span};
 use crate::layout::Layout;
 use crate::logger::{error_out, info};
 use crate::memory;
+use crate::pattern::{self, Patterns};
 use crate::resample::{Plan, PlanarU8, Window};
+use crate::simd::Chunk;
+use crate::solver::cell::{BandView, paint_background, paint_cell};
+use crate::solver::variance::{LayerGrid, layer_grid};
+use crate::solver::{Solution, Workspace, write_jsonl};
 
 /// Channels the pipeline works in (RGB; the decoder normalises to this).
 const CHANNELS: usize = 3;
@@ -90,14 +97,25 @@ struct RowItem {
 }
 
 /// Everything a row item borrows.
-///
-/// Phase 2 adds the shared solver tables here (patterns, dye tables, the
-/// per-cell `n_layers` grid from the variance pre-pass, the config); the item
-/// closure signature does not change.
 struct RowContext<'a> {
     source: &'a PlanarU8,
     plan: &'a Plan,
     layout: &'a Layout,
+    patterns: &'a Patterns,
+    /// Per-cell layer budget from the variance pre-pass.
+    layers: &'a LayerGrid,
+    /// Largest budget in the grid — the size every workspace is built for.
+    max_layers: usize,
+}
+
+/// What one row item produces.
+struct RowOutcome {
+    /// One entry per cell of the row, left to right.
+    cells: Vec<Solution>,
+    /// CPU time this item spent resampling.
+    resample: Duration,
+    /// CPU time this item spent solving and painting cells.
+    solve: Duration,
 }
 
 /// Split the wall into one item per banner row.
@@ -138,13 +156,10 @@ fn row_items(layout: &Layout, plan: &Plan) -> Vec<RowItem> {
 ///
 /// Shared borrows arrive through `ctx`; `strip` is this item's exclusive slice
 /// of the wall canvas — exactly `item.strip_rows` full canvas rows of
-/// interleaved RGB `u8`, so no two items ever touch the same byte.
-///
-/// Phase 2 slots in between the resample and the strip write: solve each cell of
-/// the row against `band` (cells borrow their patches straight out of it, no
-/// copy), match the background block on the uncovered pixels, render the cell
-/// into `strip`, and return the row's per-cell results instead of `()`.
-fn render_row(ctx: &RowContext<'_>, item: &RowItem, strip: &mut [u8]) {
+/// interleaved RGB `u8`, so no two items ever touch the same byte. Which rows a
+/// strip paints, and why that needs no coordination between items despite
+/// banners overlapping, is [`crate::solver::cell`]'s module docs.
+fn render_row(ctx: &RowContext<'_>, item: &RowItem, strip: &mut [u8]) -> RowOutcome {
     let wall_width = ctx.layout.wall_width;
     debug_assert_eq!(
         item.strip_rows,
@@ -152,66 +167,96 @@ fn render_row(ctx: &RowContext<'_>, item: &RowItem, strip: &mut [u8]) {
         "an item's strip is exactly its banner row's span"
     );
 
-    // Padding first: only reachable under --fill, and only for the parts of
-    // this strip the image does not cover.
-    if let Some(color) = ctx.layout.pad {
-        fill_padding(strip, wall_width, item, color);
-    }
-
-    if item.target_rows.is_empty() {
-        return;
-    }
+    paint_background(strip, wall_width, item.strip_rows.start);
 
     // The row's own band, resampled locally out of the source region
-    // `item.src_rect` and dropped at the end of this call.
-    let band = ctx
-        .plan
-        .band((item.src_rect.y0, item.src_rect.y1), item.dest_rect.height)
-        .resample(ctx.source);
-    debug_assert_eq!(band.channels(), CHANNELS);
-    debug_assert_eq!(band.width, item.dest_rect.width);
+    // `item.src_rect` and dropped at the end of this call. It is absent only
+    // when `--fill` leaves this row entirely padding.
+    let t = Instant::now();
+    let band = (!item.target_rows.is_empty()).then(|| {
+        ctx.plan
+            .band((item.src_rect.y0, item.src_rect.y1), item.dest_rect.height)
+            .resample(ctx.source)
+    });
+    let resample = t.elapsed();
+    debug_assert!(band.as_ref().is_none_or(|b| b.channels() == CHANNELS));
+    debug_assert!(
+        band.as_ref()
+            .is_none_or(|b| b.width == item.dest_rect.width)
+    );
 
-    let y_offset = item.dest_rect.y - item.strip_rows.start;
-    for y in 0..band.height {
-        let (r, g, b) = (band.row(0, y), band.row(1, y), band.row(2, y));
-        let start = ((y_offset + y) * wall_width + item.dest_rect.x) * CHANNELS;
-        let row = &mut strip[start..start + band.width * CHANNELS];
-        for (x, px) in row.chunks_exact_mut(CHANNELS).enumerate() {
-            px[0] = to_u8(r[x]);
-            px[1] = to_u8(g[x]);
-            px[2] = to_u8(b[x]);
-        }
+    let view = BandView::new(
+        band.as_ref(),
+        item.dest_rect.x,
+        item.dest_rect.y,
+        ctx.layout.pad.unwrap_or([0; CHANNELS]),
+    );
+
+    // Banner row 0 has nothing hanging in front of it, so it solves the full
+    // 20x40 patch; every other row solves only its visible 24 rows. Same code,
+    // two monomorphisations.
+    let t = Instant::now();
+    let cells = if item.row == 0 {
+        solve_row::<TOP_HW>(
+            ctx,
+            item,
+            &view,
+            strip,
+            &ctx.patterns.top,
+            &ctx.patterns.top_alpha2,
+        )
+    } else {
+        solve_row::<NTOP_HW>(
+            ctx,
+            item,
+            &view,
+            strip,
+            &ctx.patterns.lower,
+            &ctx.patterns.lower_alpha2,
+        )
+    };
+    let solve = t.elapsed();
+
+    RowOutcome {
+        cells,
+        resample,
+        solve,
     }
 }
 
-/// Paint the parts of `strip` the resampled image does not cover.
-fn fill_padding(strip: &mut [u8], wall_width: usize, item: &RowItem, color: [u8; 3]) {
-    let top = item.dest_rect.y - item.strip_rows.start;
-    let covered = top..top + item.dest_rect.height;
-    for (y, row) in strip.chunks_exact_mut(wall_width * CHANNELS).enumerate() {
-        let inner = if covered.contains(&y) {
-            item.dest_rect.x..item.dest_rect.x + item.dest_rect.width
-        } else {
-            0..0
-        };
-        for (x, px) in row.chunks_exact_mut(CHANNELS).enumerate() {
-            if !inner.contains(&x) {
-                px.copy_from_slice(&color);
-            }
-        }
-    }
-}
-
-/// Resampled sample → display byte. Lanczos ringing is clipped here, at the
-/// encode edge, not inside the pipeline: the `f32` band keeps the overshoot.
-#[inline]
-fn to_u8(v: f32) -> u8 {
-    v.clamp(0.0, 255.0).round() as u8
+/// Solve and paint every cell of one banner row.
+///
+/// The workspace is built once per row and reused across its cells, so the only
+/// per-cell allocation is the solution's layer list.
+fn solve_row<const HW: usize>(
+    ctx: &RowContext<'_>,
+    item: &RowItem,
+    view: &BandView<'_>,
+    strip: &mut [u8],
+    alphas: &[Chunk<HW>],
+    alpha2: &[f32],
+) -> Vec<Solution> {
+    let mut workspace = Workspace::<HW>::new(ctx.max_layers);
+    (0..ctx.layout.columns)
+        .map(|col| {
+            view.gather::<HW>(item.row, col, workspace.target_mut());
+            let solution = workspace.solve(ctx.layers.get(item.row, col), alphas, alpha2);
+            paint_cell::<HW>(
+                strip,
+                ctx.layout.wall_width,
+                item.strip_rows.start,
+                item.row,
+                col,
+                workspace.composite(),
+            );
+            solution
+        })
+        .collect()
 }
 
 // -------------------------------------------------------------------- driver
 
-/// Decode, lay out, run the row items, write this phase's output.
+/// Decode, lay out, run the row items, write this phase's outputs.
 fn run(config: &Config) {
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
@@ -228,7 +273,7 @@ fn run(config: &Config) {
     drop(rgb);
     let t_decode = t.elapsed();
 
-    // ---- layout + shared weights ------------------------------------------
+    // ---- layout + shared weights + pattern tables --------------------------
     let t = Instant::now();
     let layout = Layout::compute(
         src_w as u32,
@@ -244,13 +289,16 @@ fn run(config: &Config) {
         layout.target_height,
     );
     let items = row_items(&layout, &plan);
+    let patterns = pattern::load(&config.exclude_patterns);
     let t_plan = t.elapsed();
 
     info!(
-        "grid: {}x{} blocks ({} banners)",
+        "grid: {}x{} blocks ({} banners), {} patterns x {} dyes",
         layout.columns,
         layout.rows + 1,
-        layout.columns * layout.rows
+        layout.columns * layout.rows,
+        patterns.len(),
+        crate::color::NUM_COLORS
     );
     info!(
         "wall: {}x{} px, resampling {}x{} -> {}x{} in {} banner-row items",
@@ -261,6 +309,27 @@ fn run(config: &Config) {
         layout.target_width,
         layout.target_height,
         items.len()
+    );
+
+    // ---- variance pre-pass -------------------------------------------------
+    // Runs on the source image, before the row items, because the layer budget
+    // is a global min/max normalisation across every cell of the wall.
+    let t = Instant::now();
+    let layers = layer_grid(&source, &layout, config.n_layers);
+    let max_layers = layers.max();
+    let t_variance = t.elapsed();
+
+    info!(
+        "layers {}-{}: {}",
+        config.n_layers.0,
+        config.n_layers.1,
+        layers
+            .histogram(config.n_layers)
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{}x{}", n, i + config.n_layers.0))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 
     // ---- the pipeline: one flat par_iter over banner rows ------------------
@@ -274,14 +343,32 @@ fn run(config: &Config) {
         source: &source,
         plan: &plan,
         layout: &layout,
+        patterns: &patterns,
+        layers: &layers,
+        max_layers,
     };
-    strips
+    let outcomes: Vec<RowOutcome> = strips
         .into_par_iter()
         .zip(items.par_iter())
-        .for_each(|(strip, item)| render_row(&ctx, item, strip));
+        .map(|(strip, item)| render_row(&ctx, item, strip))
+        .collect();
     let t_pipeline = t.elapsed();
 
-    // ---- write this step's output ------------------------------------------
+    // Reduce the per-item stats now, so the outcomes can be consumed for the
+    // JSONL without copying every cell's layer list.
+    let (cpu_resample, cpu_solve) = outcomes
+        .iter()
+        .fold((Duration::ZERO, Duration::ZERO), |(r, s), o| {
+            (r + o.resample, s + o.solve)
+        });
+    let total_err: f64 = outcomes
+        .iter()
+        .flat_map(|o| o.cells.iter())
+        .map(|c| f64::from(c.error))
+        .sum();
+    let cells: Vec<Vec<Solution>> = outcomes.into_iter().map(|o| o.cells).collect();
+
+    // ---- write this step's outputs -----------------------------------------
     let t = Instant::now();
     let out =
         image::RgbImage::from_raw(layout.wall_width as u32, layout.wall_height as u32, canvas)
@@ -293,29 +380,47 @@ fn run(config: &Config) {
             e.to_string().red()
         );
     });
+
+    let jsonl = jsonl_path(&config.output);
+    write_jsonl(&jsonl, &patterns, &cells);
     let t_encode = t.elapsed();
 
     info!(
-        "wrote '{}': the resized banner wall — this phase's intermediate output \
-         (banner conversion lands in the next phase)",
-        config.output.display().to_string().yellow()
+        "wrote '{}': the composed banner wall, and '{}': the per-cell solution \
+         — this stage's intermediate outputs (refinement lands in the next stage)",
+        config.output.display().to_string().yellow(),
+        jsonl.display().to_string().yellow()
     );
 
     if config.debug {
-        let mpix = (layout.target_width * layout.target_height) as f64 / 1e6;
+        let n_cells = layout.rows * layout.columns;
+        let mean_err = total_err / n_cells as f64;
+
         debug_line("decode", t_decode, None);
-        debug_line("layout+weights", t_plan, None);
+        debug_line("layout+patterns", t_plan, None);
+        debug_line("variance", t_variance, None);
         debug_line(
             "pipeline",
             t_pipeline,
             Some(format!(
-                "{:.1} MPix/s ({:.1} MPix/s summed over {CHANNELS} channels)",
-                mpix / t_pipeline.as_secs_f64(),
-                CHANNELS as f64 * mpix / t_pipeline.as_secs_f64()
+                "{:.0} cells/s",
+                n_cells as f64 / t_pipeline.as_secs_f64()
             )),
         );
+        debug_line("  resample (cpu)", cpu_resample, None);
+        debug_line("  solve (cpu)", cpu_solve, None);
         debug_line("encode", t_encode, None);
-        debug_line("total", t_decode + t_plan + t_pipeline + t_encode, None);
+        debug_line(
+            "total",
+            t_decode + t_plan + t_variance + t_pipeline + t_encode,
+            None,
+        );
+        println!(
+            "{}: {:<16} {:.1} weighted SSE per cell",
+            "debug".blue().bold(),
+            "error",
+            mean_err
+        );
         println!(
             "{}: {:<16} peak {}, still live {}",
             "debug".blue().bold(),
@@ -324,6 +429,11 @@ fn run(config: &Config) {
             memory::format_bytes(memory::live_bytes())
         );
     }
+}
+
+/// `<OUTPUT>` with its extension replaced by `.jsonl`.
+fn jsonl_path(output: &Path) -> std::path::PathBuf {
+    output.with_extension("jsonl")
 }
 
 /// Hand each item its own exclusive slice of the canvas.

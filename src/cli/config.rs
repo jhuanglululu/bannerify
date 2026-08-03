@@ -21,8 +21,9 @@ use crate::logger::error_out;
 
 /// The validated, merged configuration the pipeline runs on.
 ///
-/// The solver fields are parsed and validated now, but nothing reads them until
-/// the phase-2 solver lands.
+/// `exclude_patterns` and `n_layers` are live as of solver stage 2a; the
+/// refinement fields are parsed and validated now, but nothing reads them until
+/// stage 2b lands.
 pub struct Config {
     /// Input image path (checked to exist).
     pub input: PathBuf,
@@ -34,23 +35,23 @@ pub struct Config {
     pub workers: Option<usize>,
     /// How the image maps onto the wall.
     pub resizing_method: ResizingMethod,
-    /// Print stage timings and dump the resized intermediate.
+    /// Print per-stage timings and memory (logs only, no extra files).
     pub debug: bool,
-    /// Phase-2: patterns the solver may not use.
+    /// Patterns the solver may not use.
     pub exclude_patterns: HashSet<String>,
-    /// Phase-2: blocks the background matcher may not use.
+    /// Phase-3: blocks the background matcher may not use.
     pub exclude_blocks: HashSet<String>,
-    /// Phase-2: `(min, max)` layers per banner.
+    /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
-    /// Phase-2: refinement settings.
+    /// Stage-2b: refinement settings.
     pub refinement: RefinementConfig,
-    /// Phase-2: `(top_n, duplicates, rounds)` perturbation search.
+    /// Stage-2b: `(top_n, duplicates, rounds)` perturbation search.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Phase-2: perceptual refinement candidate count.
+    /// Stage-2b: perceptual refinement candidate count.
     pub lab_refine: Option<usize>,
 }
 
-/// Phase-2 refinement settings (validated now, used later).
+/// Stage-2b refinement settings (validated now, used later).
 pub struct RefinementConfig {
     /// Number of refinement passes.
     pub refinement_pass: usize,
