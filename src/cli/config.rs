@@ -21,9 +21,8 @@ use crate::logger::error_out;
 
 /// The validated, merged configuration the pipeline runs on.
 ///
-/// `exclude_patterns` and `n_layers` are live as of solver stage 2a; the
-/// refinement fields are parsed and validated now, but nothing reads them until
-/// stage 2b lands.
+/// Everything here is live as of solver stage 2b except `exclude_blocks`, which
+/// waits for phase-3 block matching.
 pub struct Config {
     /// Input image path (checked to exist).
     pub input: PathBuf,
@@ -43,15 +42,17 @@ pub struct Config {
     pub exclude_blocks: HashSet<String>,
     /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
-    /// Stage-2b: refinement settings.
+    /// Windowed beam refinement settings.
     pub refinement: RefinementConfig,
-    /// Stage-2b: `(top_n, duplicates, rounds)` perturbation search.
+    /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Stage-2b: perceptual refinement candidate count.
+    /// Candidates the OKLab pass scores exactly, or `None` when off.
     pub lab_refine: Option<usize>,
+    /// Perturbation RNG seed; irrelevant unless `perturbations` is set.
+    pub seed: u64,
 }
 
-/// Stage-2b refinement settings (validated now, used later).
+/// Windowed beam refinement settings.
 pub struct RefinementConfig {
     /// Number of refinement passes.
     pub refinement_pass: usize,
@@ -80,6 +81,7 @@ pub struct ConfigToml {
     pub refinement_candidate: Option<usize>,
     pub perturbations: Option<Vec<usize>>,
     pub lab_refine: Option<usize>,
+    pub seed: Option<u64>,
 }
 
 impl From<Args> for Config {
@@ -136,6 +138,7 @@ impl From<Args> for Config {
                 config.perturbations,
             ),
             lab_refine: args.lab_refine.or(config.lab_refine),
+            seed: args.seed.or(config.seed).unwrap_or(0),
         }
     }
 }

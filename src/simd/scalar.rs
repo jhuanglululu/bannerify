@@ -42,6 +42,12 @@ impl F32s {
         self.0
     }
 
+    /// Lane-wise square root.
+    #[inline(always)]
+    pub fn sqrt(self) -> Self {
+        Self(self.0.sqrt())
+    }
+
     /// Lane-wise minimum.
     #[inline(always)]
     pub fn min(self, other: Self) -> Self {
@@ -64,6 +70,15 @@ impl F32s {
     #[inline(always)]
     pub fn simd_gt(self, other: Self) -> Mask {
         Mask(self.0 > other.0)
+    }
+
+    /// Build a register from lane values, in order.
+    ///
+    /// The inverse of [`F32s::to_array`]; see the NEON backend for why it
+    /// exists (per-lane table lookups, which no vector ISA here can express).
+    #[inline(always)]
+    pub fn from_array(v: [f32; LANES]) -> Self {
+        Self(v[0])
     }
 
     /// Lane values, in order. Diagnostics and cold paths only.

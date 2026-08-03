@@ -15,18 +15,18 @@
 //! so a pattern plane and a target plane can be zipped lane for lane with no
 //! addressing arithmetic anywhere in the kernels.
 //!
-//! Two variants per pattern, because a banner's top [`HIDDEN_H`] rows are
-//! covered by the banner hanging in front of it:
+//! **One plane per pattern, two `Σ α²` tables.** A banner's top [`HIDDEN_H`]
+//! rows are covered by the banner hanging in front of it, so rows below the
+//! first solve only their bottom 24 rows — which, the layout being row-major,
+//! are exactly the *tail* of the full plane. Stage 2a stored that tail as a
+//! second `Chunk<NTOP_HW>` per pattern; stage 2b drops it and lets the solver
+//! take the lane-aligned tail view of the full plane instead
+//! ([`crate::solver::workspace`]), the same merge the workspace itself got.
 //!
-//! - [`Patterns::top`]: the full 20×40 patch ([`TOP_HW`] floats), for banner
-//!   row 0, which nothing covers.
-//! - [`Patterns::lower`]: the bottom 24 rows ([`NTOP_HW`] floats) — the tail of
-//!   the full patch, since the layout is row-major — for every other row. Those
-//!   rows solve only what shows, which is both cheaper and correct; the old
-//!   Python build instead solved the full patch behind an occlusion mask.
-//!
-//! `Σ α²` is precomputed per pattern per variant: it is the `c²` coefficient of
-//! the solver's closed-form dye sweep, constant across cells and layers.
+//! What does differ between the variants is `Σ α²` — the `c²` coefficient of
+//! the closed-form dye sweep, which sums over exactly the solved pixels — so
+//! that stays two tables, [`Patterns::top_alpha2`] and
+//! [`Patterns::lower_alpha2`].
 
 use std::collections::HashSet;
 
@@ -50,13 +50,11 @@ struct PatternAssets;
 pub struct Patterns {
     /// Pattern ids, sorted, in table order.
     pub names: Vec<String>,
-    /// Full 20×40 alpha patches, for banner row 0.
+    /// Full 20×40 alpha patches. Lower rows use the tail of the same plane.
     pub top: Vec<Chunk<TOP_HW>>,
-    /// Bottom-24-row alpha patches, for the other banner rows.
-    pub lower: Vec<Chunk<NTOP_HW>>,
-    /// `Σ α²` over [`Patterns::top`].
+    /// `Σ α²` over the whole plane, for banner row 0.
     pub top_alpha2: Vec<f32>,
-    /// `Σ α²` over [`Patterns::lower`].
+    /// `Σ α²` over the bottom 24 rows, for every other banner row.
     pub lower_alpha2: Vec<f32>,
 }
 
@@ -104,22 +102,15 @@ pub fn load(exclude: &HashSet<String>) -> Patterns {
 
     let decoded: Vec<Chunk<TOP_HW>> = names.par_iter().map(|id| decode(id)).collect();
 
-    let lower: Vec<Chunk<NTOP_HW>> = decoded
-        .iter()
-        .map(|top| {
-            let mut lower = Chunk::<NTOP_HW>::zeroed();
-            lower.copy_from_slice(&top[TOP_HW - NTOP_HW..]);
-            lower
-        })
-        .collect();
-
     let top_alpha2 = decoded.iter().map(|p| sum_squares(p)).collect();
-    let lower_alpha2 = lower.iter().map(|p| sum_squares(p)).collect();
+    let lower_alpha2 = decoded
+        .iter()
+        .map(|p| sum_squares(&p[TOP_HW - NTOP_HW..]))
+        .collect();
 
     Patterns {
         names,
         top: decoded,
-        lower,
         top_alpha2,
         lower_alpha2,
     }

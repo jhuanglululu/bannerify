@@ -1,13 +1,19 @@
 //! The banner solver: which dyes and patterns approximate each cell.
 //!
-//! See `context/plans/2-solver.md`. **Stage 2a** — this module — is the greedy
-//! fill and the two intermediates that make it checkable: the composed preview
-//! image and a JSONL dump of every cell's decision. Windowed refinement,
-//! perturbation rounds and the OKLab pass are stage 2b and land here alongside
-//! [`greedy`].
+//! See `context/plans/2-solver.md`. A cell is solved in four stages, each
+//! skipped when its configuration disables it, all sharing one reusable
+//! [`Workspace`]:
 //!
 //! - [`variance`] — the pre-pass that hands each cell a layer budget.
-//! - [`greedy`] — the fill itself, and the reusable [`Workspace`].
+//! - [`greedy`] — the fill: base dye, then one (pattern, dye) layer at a time.
+//! - [`refine`] — windowed beam refinement over prefix/suffix caches.
+//! - [`perturb`] — random re-rolls, re-refined, kept if better.
+//! - [`lab`] — the OKLab final pass (`--lab-refine`).
+//!
+//! Support:
+//!
+//! - [`workspace`] — every buffer the stages touch, one allocation per work
+//!   item, sized for the top row and viewed as a tail for the others.
 //! - [`cell`] — getting a cell's pixels out of a column band and its composite
 //!   back into the column's preview strip.
 
@@ -22,9 +28,14 @@ use crate::pattern::Patterns;
 
 pub mod cell;
 pub mod greedy;
+pub mod lab;
+pub mod perturb;
+pub mod refine;
 pub mod variance;
+pub mod workspace;
 
-pub use greedy::{Solution, Workspace};
+pub use perturb::Rng;
+pub use workspace::{Plane, Solution, SolveCfg, Stages, Workspace};
 
 /// Write one JSONL line per cell: `{"row","col","base","layers","error"}`.
 ///

@@ -22,8 +22,8 @@
 //!
 //! ## Overlap, resolved by extraction
 //!
-//! Because a lower banner's patch *is* only its visible rows (a
-//! `Chunk<NTOP_HW>`, the tail of the full patch), the visible regions of
+//! Because a lower banner's patch *is* only its visible rows (the tail of the
+//! full patch, elements `TOP_HW - NTOP_HW ..`), the visible regions of
 //! successive banner rows are disjoint and tile the column: row 0 paints wall
 //! rows `4..44`, row 1 paints `44..68`, and so on. Painting them top to bottom
 //! therefore produces exactly the pixels that compositing lower-first and
@@ -33,11 +33,11 @@
 //! the result does not depend on scheduling.
 
 use crate::geometry::{
-    BANNER_H, BANNER_W, BLOCK_SIDE, HIDDEN_H, PAD_SIDE, PAD_TOP, VISIBLE_H, offset_column,
-    offset_row,
+    BANNER_H, BANNER_W, BLOCK_SIDE, HIDDEN_H, NTOP_HW, PAD_SIDE, PAD_TOP, TOP_HW, VISIBLE_H,
+    offset_column, offset_row,
 };
 use crate::resample::ColBand;
-use crate::simd::Chunk;
+use crate::solver::workspace::Plane;
 
 /// Channels in the preview canvas.
 const CHANNELS: usize = 3;
@@ -60,15 +60,18 @@ pub const BG_REST: [u8; CHANNELS] = [48, 48, 48];
 /// banner row 0's 40-row patch reaches into.
 const BG_TOP_ROWS: usize = 2 * BLOCK_SIDE;
 
-/// Wall rows of banner row `row`'s patch, and its height in rows.
+/// Wall rows of banner row `row`'s patch, its height in rows, and the element
+/// offset at which it starts inside a [`Plane`].
 ///
-/// Row 0 solves the full patch; the rest solve only what shows.
+/// Row 0 solves the full patch; the rest solve only what shows, which is the
+/// *tail* of a plane — the same split the workspace's lane views use
+/// ([`crate::solver::workspace`]).
 #[inline]
-pub fn patch_rows(row: usize) -> (usize, usize) {
+pub fn patch_rows(row: usize) -> (usize, usize, usize) {
     if row == 0 {
-        (PAD_TOP, BANNER_H)
+        (PAD_TOP, BANNER_H, 0)
     } else {
-        (offset_row(row), VISIBLE_H)
+        (offset_row(row), VISIBLE_H, TOP_HW - NTOP_HW)
     }
 }
 
@@ -109,15 +112,10 @@ impl<'a> BandView<'a> {
     /// row-major — the layout [`crate::pattern`] documents, so target planes and
     /// pattern planes zip lane for lane.
     ///
-    /// `HW` must match the row: `TOP_HW` for row 0, `NTOP_HW` otherwise.
-    pub fn gather<const HW: usize>(
-        &self,
-        row: usize,
-        col: usize,
-        target: &mut [Chunk<HW>; CHANNELS],
-    ) {
-        let (y0, rows) = patch_rows(row);
-        debug_assert_eq!(rows * BANNER_W, HW, "patch size does not match the row");
+    /// Only the row's active view of each plane is written: rows below the top
+    /// fill elements `TOP_HW - NTOP_HW ..`, leaving the head untouched.
+    pub fn gather(&self, row: usize, col: usize, target: &mut [Plane; CHANNELS]) {
+        let (y0, rows, base) = patch_rows(row);
         let x0 = offset_column(col);
 
         for y in 0..rows {
@@ -125,7 +123,7 @@ impl<'a> BandView<'a> {
                 .band
                 .and_then(|b| (y0 + y).checked_sub(self.y).filter(|y| *y < b.height));
             for (ch, plane) in target.iter_mut().enumerate() {
-                let out = &mut plane[y * BANNER_W..(y + 1) * BANNER_W];
+                let out = &mut plane[base + y * BANNER_W..base + (y + 1) * BANNER_W];
                 let (Some(band), Some(band_y)) = (self.band, band_y) else {
                     out.fill(self.fallback[ch]);
                     continue;
@@ -163,18 +161,13 @@ pub fn paint_background(strip: &mut [u8]) {
 /// target. Values can sit slightly outside `0..255` (nothing in the compositing
 /// algebra clamps, and lanczos overshoot rides in through the target), so the
 /// clamp happens here, at the byte edge.
-pub fn paint_cell<const HW: usize>(
-    strip: &mut [u8],
-    row: usize,
-    composite: &[Chunk<HW>; CHANNELS],
-) {
-    let (y0, rows) = patch_rows(row);
-    debug_assert_eq!(rows * BANNER_W, HW, "composite size does not match the row");
+pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
+    let (y0, rows, base) = patch_rows(row);
 
     for y in 0..rows {
         let start = (y0 + y) * STRIP_PITCH + PAD_SIDE * CHANNELS;
         let out = &mut strip[start..start + BANNER_W * CHANNELS];
-        let src = y * BANNER_W;
+        let src = base + y * BANNER_W;
         for (x, px) in out.chunks_exact_mut(CHANNELS).enumerate() {
             for (ch, byte) in px.iter_mut().enumerate() {
                 *byte = to_u8(composite[ch][src + x]);

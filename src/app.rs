@@ -30,16 +30,15 @@ use rayon::prelude::*;
 
 use crate::cli::Args;
 use crate::cli::config::Config;
-use crate::geometry::{BLOCK_SIDE, NTOP_HW, TOP_HW};
+use crate::geometry::BLOCK_SIDE;
 use crate::layout::Layout;
 use crate::logger::{error_out, info};
 use crate::memory;
-use crate::pattern::{self, Patterns};
+use crate::pattern;
 use crate::resample::{Plan, PlanarU8, Window};
-use crate::simd::Chunk;
 use crate::solver::cell::{BandView, STRIP_PITCH, paint_background, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
-use crate::solver::{Solution, Workspace, write_jsonl};
+use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace, write_jsonl};
 
 /// Channels the pipeline works in (RGB; the decoder normalises to this).
 const CHANNELS: usize = 3;
@@ -86,11 +85,15 @@ struct ColContext<'a> {
     source: &'a PlanarU8,
     plan: &'a Plan,
     layout: &'a Layout,
-    patterns: &'a Patterns,
     /// Per-cell layer budget from the variance pre-pass.
     layers: &'a LayerGrid,
     /// Largest budget in the grid — the size every workspace is built for.
     max_layers: usize,
+    /// The solver stages' shared configuration.
+    solve: SolveCfg<'a>,
+    /// Perturbation RNG seed; each item derives its stream from it and its
+    /// column index.
+    seed: u64,
 }
 
 /// What one column item produces.
@@ -104,6 +107,8 @@ struct ColOutcome {
     resample: Duration,
     /// CPU time this item spent solving and painting cells.
     solve: Duration,
+    /// ...split by solver stage.
+    stages: Stages,
 }
 
 /// Split the wall into one item per block column.
@@ -181,36 +186,24 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         ctx.layout.pad.unwrap_or([0; CHANNELS]),
     );
 
-    // Cells top to bottom. Banner row 0 has nothing hanging in front of it, so
-    // it solves the full 20x40 patch; every other row solves only its visible 24
-    // rows. Same code, two monomorphisations — hence two workspaces, each reused
-    // down the column.
+    // Cells top to bottom, through one workspace. Banner row 0 has nothing
+    // hanging in front of it, so it solves the full 20x40 patch; every other row
+    // solves only its visible 24 rows — the lane-aligned tail of the same
+    // buffers (`crate::solver::workspace`), which is why one allocation serves
+    // both and nothing is re-zeroed between cells.
     let t = Instant::now();
     let mut cells = Vec::with_capacity(ctx.layout.rows);
-    let mut top = Workspace::<TOP_HW>::new(ctx.max_layers);
-    let mut lower = Workspace::<NTOP_HW>::new(ctx.max_layers);
+    let mut workspace = Workspace::new(ctx.max_layers, ctx.solve.refinement.refinement_candidate);
+    // One PRNG stream per column item, advanced down the column's cells: the
+    // banner row never enters the seeding, so the draws a cell sees depend only
+    // on the seed, the column and how many cells precede it.
+    let mut rng = Rng::new(ctx.seed, item.col as u64);
     for row in 0..ctx.layout.rows {
-        cells.push(if row == 0 {
-            solve_cell(
-                ctx,
-                &mut top,
-                &view,
-                &mut strip,
-                (row, item.col),
-                &ctx.patterns.top,
-                &ctx.patterns.top_alpha2,
-            )
-        } else {
-            solve_cell(
-                ctx,
-                &mut lower,
-                &view,
-                &mut strip,
-                (row, item.col),
-                &ctx.patterns.lower,
-                &ctx.patterns.lower_alpha2,
-            )
-        });
+        workspace.begin(row);
+        view.gather(row, item.col, workspace.target_mut());
+        let solution = workspace.solve(ctx.layers.get(row, item.col), &ctx.solve, &mut rng);
+        paint_cell(&mut strip, row, workspace.composite());
+        cells.push(solution);
     }
     let solve = t.elapsed();
 
@@ -219,23 +212,8 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         strip,
         resample,
         solve,
+        stages: workspace.stages,
     }
-}
-
-/// Solve cell `(row, col)` and paint it into the column strip.
-fn solve_cell<const HW: usize>(
-    ctx: &ColContext<'_>,
-    workspace: &mut Workspace<HW>,
-    view: &BandView<'_>,
-    strip: &mut [u8],
-    (row, col): (usize, usize),
-    alphas: &[Chunk<HW>],
-    alpha2: &[f32],
-) -> Solution {
-    view.gather::<HW>(row, col, workspace.target_mut());
-    let solution = workspace.solve(ctx.layers.get(row, col), alphas, alpha2);
-    paint_cell::<HW>(strip, row, workspace.composite());
-    solution
 }
 
 /// Copy every column strip into the wall canvas.
@@ -368,9 +346,16 @@ fn run(config: &Config) {
         source: &source,
         plan: &plan,
         layout: &layout,
-        patterns: &patterns,
         layers: &layers,
         max_layers,
+        solve: SolveCfg {
+            patterns: &patterns,
+            refinement: &config.refinement,
+            perturbations: config.perturbations,
+            lab_refine: config.lab_refine,
+            report_lab: config.debug,
+        },
+        seed: config.seed,
     };
     let outcomes: Vec<ColOutcome> = items
         .par_iter()
@@ -391,10 +376,19 @@ fn run(config: &Config) {
         .fold((Duration::ZERO, Duration::ZERO), |(r, s), o| {
             (r + o.resample, s + o.solve)
         });
+    let mut stages = Stages::default();
+    for outcome in &outcomes {
+        stages.add(&outcome.stages);
+    }
     let total_err: f64 = outcomes
         .iter()
         .flat_map(|o| o.cells.iter())
         .map(|c| f64::from(c.error))
+        .sum();
+    let total_lab: f64 = outcomes
+        .iter()
+        .flat_map(|o| o.cells.iter())
+        .map(|c| f64::from(c.lab_error))
         .sum();
     let cells: Vec<Vec<Solution>> = outcomes.into_iter().map(|o| o.cells).collect();
 
@@ -417,7 +411,7 @@ fn run(config: &Config) {
 
     info!(
         "wrote '{}': the composed banner wall, and '{}': the per-cell solution \
-         — this stage's intermediate outputs (refinement lands in the next stage)",
+         — this stage's intermediate outputs (block background and HTML export land in phase 3)",
         config.output.display().to_string().yellow(),
         jsonl.display().to_string().yellow()
     );
@@ -439,6 +433,10 @@ fn run(config: &Config) {
         );
         debug_line("  resample (cpu)", cpu_resample, None);
         debug_line("  solve (cpu)", cpu_solve, None);
+        debug_line("    greedy (cpu)", stages.greedy, None);
+        debug_line("    refine (cpu)", stages.refine, None);
+        debug_line("    perturb (cpu)", stages.perturb, None);
+        debug_line("    oklab (cpu)", stages.oklab, None);
         debug_line(
             "interleave",
             t_interleave,
@@ -451,10 +449,11 @@ fn run(config: &Config) {
             None,
         );
         println!(
-            "{}: {:<16} {:.1} weighted SSE per cell",
+            "{}: {:<16} {:.1} weighted SSE per cell, {:.4} mean OKLab dE per pixel",
             "debug".blue().bold(),
             "error",
-            mean_err
+            mean_err,
+            total_lab / n_cells as f64
         );
         println!(
             "{}: {:<16} peak {}, still live {}",

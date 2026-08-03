@@ -50,6 +50,13 @@ impl F32s {
         unsafe { vaddvq_f32(self.0) }
     }
 
+    /// Lane-wise square root.
+    #[inline(always)]
+    pub fn sqrt(self) -> Self {
+        // SAFETY: baseline NEON intrinsic, no preconditions.
+        Self(unsafe { vsqrtq_f32(self.0) })
+    }
+
     /// Lane-wise minimum.
     #[inline(always)]
     pub fn min(self, other: Self) -> Self {
@@ -76,6 +83,19 @@ impl F32s {
     pub fn simd_gt(self, other: Self) -> Mask {
         // SAFETY: baseline NEON intrinsic, no preconditions.
         Mask(unsafe { vcgtq_f32(self.0, other.0) })
+    }
+
+    /// Build a register from lane values, in order.
+    ///
+    /// The inverse of [`F32s::to_array`], and the same cost class: a store plus
+    /// a load. It exists for the one thing vector code genuinely cannot do —
+    /// a per-lane table lookup (NEON has no gather) — which is how
+    /// [`crate::oklab`] linearises sRGB. Not for arithmetic.
+    #[inline(always)]
+    pub fn from_array(v: [f32; LANES]) -> Self {
+        // SAFETY: `[f32; 4]` and `float32x4_t` have the same size and layout,
+        // and every bit pattern is valid for both.
+        Self(unsafe { core::mem::transmute::<[f32; 4], float32x4_t>(v) })
     }
 
     /// Lane values, in order. Diagnostics and cold paths only.
