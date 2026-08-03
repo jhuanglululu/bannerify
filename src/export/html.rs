@@ -513,10 +513,10 @@ function showBanner() {
   give.textContent = giveCommand(cell);
 
   let html = '<table>\n<tr><th>Step</th><th>Pattern</th><th>Dye</th></tr>\n';
-  html += '<tr><td class="num">—</td><td>Base</td><td>' + swatch(cell[0]) +
-    DATA.l[cell[0]] + ' wool + stick</td></tr>\n';
   html += '<tr><td class="num">—</td><td>Wall block</td><td><code class="inline">' +
     DATA.b[DATA.k[r - 1][c - 1]] + '</code></td></tr>\n';
+  html += '<tr><td class="num">—</td><td>Base</td><td>' + swatch(cell[0]) +
+    DATA.l[cell[0]] + ' wool + stick</td></tr>\n';
   let step = 0;
   for (let i = 1; i < cell.length; i += 2) {
     step += 1;
