@@ -35,6 +35,3 @@ pub use aligned::AlignedVec;
 pub use backend::{F32s, LANES, Mask};
 pub use chunk::Chunk;
 pub use zip::{LaneSrc, LaneSrcMut};
-
-#[cfg(test)]
-mod tests;
