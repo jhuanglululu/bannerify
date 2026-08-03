@@ -33,10 +33,32 @@ use super::weights::{HWeights, VWeights, round_up};
 use crate::simd::{AlignedVec, F32s, LANES};
 use crate::zip;
 
+/// What the H pass can read from: an image the band asks for one span of one
+/// row of one channel at a time.
+///
+/// Two implementations, and the difference between them is *where the u8 → f32
+/// widening reads from*, never an extra buffer: [`PlanarU8`] (the decoded source
+/// image) reads a contiguous run, [`InterleavedU8`] (the rendered wall canvas)
+/// reads the same run strided by the channel count. That is what lets the
+/// preview downscale run straight off the canvas — the canvas is never copied
+/// into planes, because the only thing that would want the planar copy is this
+/// load, and this load can stride.
+pub trait Source: Sync {
+    /// Image width in pixels.
+    fn width(&self) -> usize;
+    /// Image height in pixels.
+    fn height(&self) -> usize;
+    /// Number of channels.
+    fn channels(&self) -> usize;
+    /// Widen row `y` of `channel`, columns `span`, into `dst` at the same
+    /// indices. Everything outside the span must be left untouched.
+    fn load_span(&self, channel: usize, y: usize, span: (usize, usize), dst: &mut AlignedVec);
+}
+
 /// A decoded image as separate `u8` planes, row-major, `width * height` each.
 ///
-/// Planar is the only layout the crate uses past decode; the single
-/// interleaved → planar conversion happens here, at the decode edge.
+/// Planar is the layout the crate uses for the decoded source; the single
+/// interleaved → planar conversion happens at the decode edge.
 pub struct PlanarU8 {
     /// Image width in pixels.
     pub width: usize,
@@ -63,6 +85,60 @@ impl PlanarU8 {
     /// Number of channels.
     pub fn channels(&self) -> usize {
         self.planes.len()
+    }
+}
+
+impl Source for PlanarU8 {
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn channels(&self) -> usize {
+        self.planes.len()
+    }
+    fn load_span(&self, channel: usize, y: usize, span: (usize, usize), dst: &mut AlignedVec) {
+        let (x_lo, x_hi) = span;
+        let plane = &self.planes[channel];
+        let row = &plane[y * self.width + x_lo..y * self.width + x_hi];
+        for (d, &s) in dst[x_lo..x_hi].iter_mut().zip(row) {
+            *d = f32::from(s);
+        }
+    }
+}
+
+/// An interleaved `u8` image borrowed as a resample source — the rendered wall
+/// canvas, which the preview downscale reads *in place*.
+pub struct InterleavedU8<'a> {
+    /// Row-major, `width * height * channels` samples.
+    pub data: &'a [u8],
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Samples per pixel.
+    pub channels: usize,
+}
+
+impl Source for InterleavedU8<'_> {
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+    fn channels(&self) -> usize {
+        self.channels
+    }
+    fn load_span(&self, channel: usize, y: usize, span: (usize, usize), dst: &mut AlignedVec) {
+        let (x_lo, x_hi) = span;
+        let c = self.channels;
+        let base = (y * self.width + x_lo) * c;
+        let row = &self.data[base..base + (x_hi - x_lo) * c];
+        for (d, px) in dst[x_lo..x_hi].iter_mut().zip(row.chunks_exact(c)) {
+            *d = f32::from(px[channel]);
+        }
     }
 }
 
@@ -209,10 +285,10 @@ impl ColumnPlan<'_> {
     /// later: these per-item buffers (band + ring + scratch) are a natural fit
     /// for a per-worker arena handed out without zeroing, which would remove the
     /// per-item allocation traffic entirely.
-    pub fn resample(&self, src: &PlanarU8) -> ColBand {
+    pub fn resample<S: Source + ?Sized>(&self, src: &S) -> ColBand {
         let plan = self.plan;
-        assert_eq!(src.width, plan.src_width, "source width mismatch");
-        assert_eq!(src.height, plan.src_height, "source height mismatch");
+        assert_eq!(src.width(), plan.src_width, "source width mismatch");
+        assert_eq!(src.height(), plan.src_height, "source height mismatch");
 
         let height = plan.dst_height;
         let stride = self.out_stride;
@@ -241,10 +317,8 @@ impl ColumnPlan<'_> {
             })
             .collect();
 
-        let planes = src
-            .planes
-            .iter()
-            .map(|plane| {
+        let planes = (0..src.channels())
+            .map(|channel| {
                 // SAFETY: `v_pass` writes every element of the band buffer —
                 // one full `stride`-float row per output row — before it is read.
                 let mut buf = unsafe { AlignedVec::new_uninit(height * stride) };
@@ -253,7 +327,7 @@ impl ColumnPlan<'_> {
                     let (start, taps) = plan.v.row(local);
                     for y in next_src.max(start)..start + kv {
                         let clamped = y.min(plan.src_height - 1);
-                        load_span(plane, plan.src_width, clamped, (x_lo, x_hi), &mut srow);
+                        src.load_span(channel, clamped, (x_lo, x_hi), &mut srow);
                         h_pass(&self.h, &srow, &mut ring[y % kv]);
                     }
                     next_src = next_src.max(start + kv);
@@ -298,17 +372,6 @@ impl ColBand {
     pub fn row(&self, channel: usize, y: usize) -> &[f32] {
         let start = y * self.stride;
         &self.planes[channel][start..start + self.width]
-    }
-}
-
-/// Widen source row `y`, columns `span`, into `dst` at the same indices (u8 →
-/// f32 at H-pass load). Everything outside the span keeps what `dst` already
-/// holds, which is the zero it was constructed with.
-fn load_span(plane: &[u8], src_width: usize, y: usize, span: (usize, usize), dst: &mut AlignedVec) {
-    let (x_lo, x_hi) = span;
-    let row = &plane[y * src_width + x_lo..y * src_width + x_hi];
-    for (d, &s) in dst[x_lo..x_hi].iter_mut().zip(row) {
-        *d = f32::from(s);
     }
 }
 

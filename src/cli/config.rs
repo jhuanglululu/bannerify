@@ -21,8 +21,7 @@ use crate::logger::error_out;
 
 /// The validated, merged configuration the pipeline runs on.
 ///
-/// Everything here is live as of solver stage 2b except `exclude_blocks`, which
-/// waits for phase-3 block matching.
+/// Every field is live as of phase 3.
 pub struct Config {
     /// Input image path (checked to exist).
     pub input: PathBuf,
@@ -38,8 +37,14 @@ pub struct Config {
     pub debug: bool,
     /// Patterns the solver may not use.
     pub exclude_patterns: HashSet<String>,
-    /// Phase-3: blocks the background matcher may not use.
+    /// Blocks the background matcher may not use.
     pub exclude_blocks: HashSet<String>,
+    /// Largest dimension of the embedded preview images, or `None` for the
+    /// input image's own size. Clamped to the wall either way
+    /// ([`crate::preview::dimensions`]).
+    pub preview: Option<usize>,
+    /// Where to write the full-resolution wall render, if anywhere.
+    pub render: Option<PathBuf>,
     /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
     /// Windowed beam refinement settings.
@@ -82,6 +87,8 @@ pub struct ConfigToml {
     pub perturbations: Option<Vec<usize>>,
     pub lab_refine: Option<usize>,
     pub seed: Option<u64>,
+    pub preview: Option<usize>,
+    pub render: Option<PathBuf>,
 }
 
 impl From<Args> for Config {
@@ -113,6 +120,8 @@ impl From<Args> for Config {
                     .or(config.exclude_blocks)
                     .unwrap_or_default(),
             ),
+            preview: parse_preview(args.preview.or(config.preview)),
+            render: args.render.or(config.render),
             n_layers,
             refinement: RefinementConfig {
                 refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
@@ -171,6 +180,19 @@ fn load_config(path: Option<&std::path::Path>) -> (ConfigToml, String) {
     });
 
     (config, shown)
+}
+
+/// `--preview 0` is meaningless — a zero-pixel image — and almost certainly a
+/// typo, so it is refused rather than silently clamped to one pixel.
+fn parse_preview(preview: Option<usize>) -> Option<usize> {
+    if preview == Some(0) {
+        error_out!(
+            "'{}' needs to be at least '{}'",
+            "--preview".yellow(),
+            "1".yellow()
+        );
+    }
+    preview
 }
 
 fn validate_input(input: PathBuf) -> PathBuf {

@@ -3,42 +3,48 @@
 //!
 //! One work item is one block column (`context/designs/pipeline.md`): a
 //! full-height, 24-pixel-wide slice of the wall. The closure borrows the source
-//! planes, the shared vertical weights, the pattern tables, the layer grid and
-//! the layout; it builds its own horizontal weights, resamples its own column
-//! band locally, solves its cells top to bottom, and paints them into its own
+//! planes, the shared vertical weights, the pattern and block tables, the layer
+//! grid and the layout; it builds its own horizontal weights, resamples its own
+//! column band locally, matches a background block for each of its block cells,
+//! solves its banner cells top to bottom, and paints all of it into its own
 //! strip — no shared mutable state, no locking, no cross-item handoff.
 //!
 //! Columns, never rows: banners bridge every horizontal block seam, so no
-//! horizontal cut lets an item own complete block rows, while a vertical cut on
+//! horizontal cut lets an item own complete block cells, while a vertical cut on
 //! a block-column boundary cuts nothing (banners never cross columns). The
-//! banner-over-banner overlap — and, in phase 3, block-behind-banner
-//! compositing — is then entirely internal to an item.
+//! banner-over-banner overlap and the block-behind-banner compositing are then
+//! entirely internal to an item.
 //!
-//! Phase 2 stops after the greedy fill (stage 2a, `context/plans/2-solver.md`),
-//! so the tool's normal output is that intermediate: the composed banner wall as
-//! a PNG at `<OUTPUT>`, plus the per-cell decisions as JSONL beside it. The
-//! resized-image intermediate phase 1 wrote is gone, as planned — earlier
+//! Phase 3 completes the pipeline, so the tool's normal output is no longer an
+//! intermediate: `<OUTPUT>` is the self-contained HTML export, and the phase-2
+//! intermediates (the bare wall PNG, the per-cell JSONL) are gone — earlier
 //! intermediates are deleted when a later stage lands, never kept behind a flag.
+//! The full-resolution wall is still available, but only when asked for by name:
+//! `--render PATH`.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use colored::Colorize;
 use rayon::prelude::*;
 
+use crate::block::{self, Blocks};
 use crate::cli::Args;
 use crate::cli::config::Config;
+use crate::export::{Wall, html, schematic};
 use crate::geometry::BLOCK_SIDE;
 use crate::layout::Layout;
 use crate::logger::{error_out, info};
 use crate::memory;
 use crate::pattern;
-use crate::resample::{Plan, PlanarU8, Window};
-use crate::solver::cell::{BandView, STRIP_PITCH, paint_background, paint_cell};
+use crate::preview;
+use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
+use crate::solver::block::{BlockScratch, match_cell};
+use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
-use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace, write_jsonl};
+use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace};
 
 /// Channels the pipeline works in (RGB; the decoder normalises to this).
 const CHANNELS: usize = 3;
@@ -85,6 +91,8 @@ struct ColContext<'a> {
     source: &'a PlanarU8,
     plan: &'a Plan,
     layout: &'a Layout,
+    /// The background block table.
+    blocks: &'a Blocks,
     /// Per-cell layer budget from the variance pre-pass.
     layers: &'a LayerGrid,
     /// Largest budget in the grid — the size every workspace is built for.
@@ -98,14 +106,20 @@ struct ColContext<'a> {
 
 /// What one column item produces.
 struct ColOutcome {
-    /// One entry per cell of the column, top to bottom.
+    /// One entry per banner cell of the column, top to bottom.
     cells: Vec<Solution>,
+    /// One matched block index per *block* cell of the column — one more entry
+    /// than `cells`, because a wall of `rows` banner rows is `rows + 1` blocks
+    /// tall.
+    blocks: Vec<usize>,
     /// The column's rendered preview strip: `wall_height` rows of
     /// [`STRIP_PITCH`] bytes, interleaved into the canvas after the `par_iter`.
     strip: Vec<u8>,
     /// CPU time this item spent resampling.
     resample: Duration,
-    /// CPU time this item spent solving and painting cells.
+    /// CPU time this item spent matching and painting background blocks.
+    blocks_cpu: Duration,
+    /// CPU time this item spent solving and painting banner cells.
     solve: Duration,
     /// ...split by solver stage.
     stages: Stages,
@@ -153,7 +167,12 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
 /// rather than a slice of the canvas: the canvas is row-major, so a column of it
 /// is not a contiguous `&mut [u8]` and `split_at_mut` cannot hand one out.
 /// Painting locally and interleaving once keeps the whole pipeline in safe code,
-/// and the copy lands in a buffer that has to exist for the PNG encode anyway.
+/// and the copy lands in a buffer that has to exist for the downscale anyway.
+///
+/// Order inside the item is the order the wall is built in: blocks first, over
+/// the whole strip, then banners over them. Nothing has to be composited, because
+/// the banners' visible regions tile exactly and the block pixels that survive
+/// are precisely the hollow frame the matcher scored ([`crate::block`]).
 fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
     debug_assert_eq!(
         item.strip_cols.len(),
@@ -161,7 +180,6 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         "one item, one block column"
     );
     let mut strip = vec![0u8; ctx.layout.wall_height * STRIP_PITCH];
-    paint_background(&mut strip);
 
     // The column's own band, resampled locally out of the source region
     // `item.src_rect` and dropped at the end of this call. It is absent only
@@ -186,6 +204,19 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         ctx.layout.pad.unwrap_or([0; CHANNELS]),
     );
 
+    // ---- the wall behind the banners ---------------------------------------
+    let t = Instant::now();
+    let block_rows = ctx.layout.rows + 1;
+    let mut scratch = BlockScratch::new();
+    let mut blocks = Vec::with_capacity(block_rows);
+    for row in 0..block_rows {
+        let id = match_cell(&view, &mut scratch, ctx.blocks, row, item.col, block_rows);
+        paint_block(&mut strip, row, &ctx.blocks.texture[id]);
+        blocks.push(id);
+    }
+    let blocks_cpu = t.elapsed();
+
+    // ---- the banners hanging on it -----------------------------------------
     // Cells top to bottom, through one workspace. Banner row 0 has nothing
     // hanging in front of it, so it solves the full 20x40 patch; every other row
     // solves only its visible 24 rows — the lane-aligned tail of the same
@@ -209,8 +240,10 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
 
     ColOutcome {
         cells,
+        blocks,
         strip,
         resample,
+        blocks_cpu,
         solve,
         stages: workspace.stages,
     }
@@ -221,12 +254,9 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
 /// Parallel over canvas rows: each canvas row is written once, left to right,
 /// gathering one 24-pixel run from each strip. This is the only wall-sized copy
 /// in the pipeline, and it is acceptable only because the canvas has to exist
-/// for the PNG encode regardless — nothing else wall-sized is materialised.
-///
-/// Kept as a standalone step on purpose: the full-resolution canvas is an
-/// intermediate consumer, and the HTML export will want a *downscaled* preview
-/// (through this crate's own resampler). That stage slots in right after this
-/// one, taking the assembled canvas as its input.
+/// for the preview downscale regardless — nothing else wall-sized is
+/// materialised, and in particular the canvas is never widened to `f32`
+/// ([`crate::preview`] reads it strided, in place).
 fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
     canvas
         .par_chunks_mut(wall_width * CHANNELS)
@@ -264,8 +294,10 @@ pub fn run_cli() {
     run(&config);
 }
 
-/// Decode, lay out, run the column items, write this stage's outputs.
+/// Decode, lay out, run the column items, write the export.
 fn run(config: &Config) {
+    let started = Instant::now();
+
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
     let decoded = image::open(&config.input).unwrap_or_else(|e| {
@@ -281,7 +313,7 @@ fn run(config: &Config) {
     drop(rgb);
     let t_decode = t.elapsed();
 
-    // ---- layout + shared weights + pattern tables --------------------------
+    // ---- layout + shared weights + pattern and block tables ----------------
     let t = Instant::now();
     let layout = Layout::compute(
         src_w as u32,
@@ -297,16 +329,20 @@ fn run(config: &Config) {
         layout.target_height,
     );
     let items = col_items(&layout, &plan);
-    let patterns = pattern::load(&config.exclude_patterns);
+    let (patterns, blocks) = rayon::join(
+        || pattern::load(&config.exclude_patterns),
+        || block::load(&config.exclude_blocks),
+    );
     let t_plan = t.elapsed();
 
     info!(
-        "grid: {}x{} blocks ({} banners), {} patterns x {} dyes",
+        "grid: {}x{} blocks ({} banners), {} patterns x {} dyes, {} blocks",
         layout.columns,
         layout.rows + 1,
         layout.columns * layout.rows,
         patterns.len(),
-        crate::color::NUM_COLORS
+        crate::color::NUM_COLORS,
+        blocks.len(),
     );
     info!(
         "wall: {}x{} px, resampling {}x{} -> {}x{} in {} block-column items",
@@ -346,6 +382,7 @@ fn run(config: &Config) {
         source: &source,
         plan: &plan,
         layout: &layout,
+        blocks: &blocks,
         layers: &layers,
         max_layers,
         solve: SolveCfg {
@@ -369,13 +406,12 @@ fn run(config: &Config) {
     interleave(&mut canvas, &outcomes, layout.wall_width);
     let t_interleave = t.elapsed();
 
-    // Reduce the per-item stats now, so the outcomes can be consumed for the
-    // JSONL without copying every cell's layer list.
-    let (cpu_resample, cpu_solve) = outcomes
-        .iter()
-        .fold((Duration::ZERO, Duration::ZERO), |(r, s), o| {
-            (r + o.resample, s + o.solve)
-        });
+    // Reduce the per-item stats now, so the outcomes can be consumed without
+    // copying every cell's layer list.
+    let (cpu_resample, cpu_blocks, cpu_solve) = outcomes.iter().fold(
+        (Duration::ZERO, Duration::ZERO, Duration::ZERO),
+        |(r, b, s), o| (r + o.resample, b + o.blocks_cpu, s + o.solve),
+    );
     let mut stages = Stages::default();
     for outcome in &outcomes {
         stages.add(&outcome.stages);
@@ -390,30 +426,111 @@ fn run(config: &Config) {
         .flat_map(|o| o.cells.iter())
         .map(|c| f64::from(c.lab_error))
         .sum();
-    let cells: Vec<Vec<Solution>> = outcomes.into_iter().map(|o| o.cells).collect();
+    let (cells, block_ids): (Vec<Vec<Solution>>, Vec<Vec<usize>>) =
+        outcomes.into_iter().map(|o| (o.cells, o.blocks)).unzip();
 
-    // ---- write this step's outputs -----------------------------------------
+    // ---- the full-resolution wall, only when asked for by name -------------
     let t = Instant::now();
-    let out =
-        image::RgbImage::from_raw(layout.wall_width as u32, layout.wall_height as u32, canvas)
-            .unwrap_or_else(|| error_out!("internal error: canvas has the wrong size"));
-    out.save(&config.output).unwrap_or_else(|e| {
+    if let Some(path) = &config.render {
+        write_png(path, &canvas, layout.wall_width, layout.wall_height);
+        info!(
+            "wrote '{}': the full-resolution wall render",
+            path.display().to_string().yellow()
+        );
+    }
+    let t_render = t.elapsed();
+
+    // ---- the two preview panes, both through our own resampler -------------
+    let t = Instant::now();
+    let (pw, ph) = preview::dimensions(
+        config.preview,
+        (src_w, src_h),
+        (layout.wall_width, layout.wall_height),
+    );
+    let wall_src = InterleavedU8 {
+        data: &canvas,
+        width: layout.wall_width,
+        height: layout.wall_height,
+        channels: CHANNELS,
+    };
+    let (generated, original) = rayon::join(
+        || {
+            preview::resize(
+                &wall_src,
+                Window::full(layout.wall_width, layout.wall_height),
+                pw,
+                ph,
+            )
+        },
+        || preview::resize(&source, layout.window, pw, ph),
+    );
+    let t_preview = t.elapsed();
+    drop(canvas);
+
+    let (preview_png, original_jpeg) = rayon::join(
+        || encode(&generated, pw, ph, image::ImageFormat::Png),
+        || encode(&original, pw, ph, image::ImageFormat::Jpeg),
+    );
+    let t_encode = t.elapsed() - t_preview;
+
+    // ---- the exports -------------------------------------------------------
+    let t = Instant::now();
+    let wall = Wall {
+        rows: layout.rows,
+        columns: layout.columns,
+        patterns: &patterns,
+        blocks: &blocks,
+        block_ids: &block_ids,
+        cells: &cells,
+    };
+    let stem = config
+        .output
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "banners".to_string());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let (schem_bytes, litematic_bytes) = rayon::join(
+        || schematic::schem(&wall),
+        || schematic::litematic(&wall, &stem, now.as_millis() as i64),
+    );
+    let t_schematic = t.elapsed();
+
+    let t = Instant::now();
+    let input_name = config
+        .input
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| config.input.display().to_string());
+    let report = html::Report {
+        input: &input_name,
+        stem: &stem,
+        date: &date(now.as_secs() as i64),
+        seconds: started.elapsed().as_secs_f64(),
+        preview: &preview_png,
+        original: &original_jpeg,
+        original_mime: "image/jpeg",
+        size: (pw, ph),
+        litematic: &litematic_bytes,
+        schem: &schem_bytes,
+    };
+    let page = html::page(&wall, &report);
+    std::fs::write(&config.output, page.as_bytes()).unwrap_or_else(|e| {
         error_out!(
             "could not write '{}': {}",
             config.output.display().to_string().yellow(),
             e.to_string().red()
         );
     });
-
-    let jsonl = jsonl_path(&config.output);
-    write_jsonl(&jsonl, &patterns, &cells);
-    let t_encode = t.elapsed();
+    let t_html = t.elapsed();
 
     info!(
-        "wrote '{}': the composed banner wall, and '{}': the per-cell solution \
-         — this stage's intermediate outputs (block background and HTML export land in phase 3)",
+        "wrote '{}': the banner chart ({}), preview {}x{}",
         config.output.display().to_string().yellow(),
-        jsonl.display().to_string().yellow()
+        memory::format_bytes(page.len()),
+        pw,
+        ph,
     );
 
     if config.debug {
@@ -421,7 +538,7 @@ fn run(config: &Config) {
         let mean_err = total_err / n_cells as f64;
 
         debug_line("decode", t_decode, None);
-        debug_line("layout+patterns", t_plan, None);
+        debug_line("layout+tables", t_plan, None);
         debug_line("variance", t_variance, None);
         debug_line(
             "pipeline",
@@ -432,6 +549,15 @@ fn run(config: &Config) {
             )),
         );
         debug_line("  resample (cpu)", cpu_resample, None);
+        debug_line(
+            "  blocks (cpu)",
+            cpu_blocks,
+            Some(format!(
+                "{} block cells x {} candidates",
+                (layout.rows + 1) * layout.columns,
+                blocks.len()
+            )),
+        );
         debug_line("  solve (cpu)", cpu_solve, None);
         debug_line("    greedy (cpu)", stages.greedy, None);
         debug_line("    refine (cpu)", stages.refine, None);
@@ -442,12 +568,34 @@ fn run(config: &Config) {
             t_interleave,
             Some(format!("{} column strips -> canvas", layout.columns)),
         );
-        debug_line("encode", t_encode, None);
+        if config.render.is_some() {
+            debug_line("render png", t_render, None);
+        }
         debug_line(
-            "total",
-            t_decode + t_plan + t_variance + t_pipeline + t_interleave + t_encode,
-            None,
+            "preview",
+            t_preview,
+            Some(format!("wall + original -> {pw}x{ph}")),
         );
+        debug_line(
+            "  encode",
+            t_encode,
+            Some(format!(
+                "{} + {}",
+                memory::format_bytes(preview_png.len()),
+                memory::format_bytes(original_jpeg.len())
+            )),
+        );
+        debug_line(
+            "schematics",
+            t_schematic,
+            Some(format!(
+                "{} .schem + {} .litematic, gzipped",
+                memory::format_bytes(schem_bytes.len()),
+                memory::format_bytes(litematic_bytes.len())
+            )),
+        );
+        debug_line("html", t_html, Some(memory::format_bytes(page.len())));
+        debug_line("total", started.elapsed(), None);
         println!(
             "{}: {:<16} {:.1} weighted SSE per cell, {:.4} mean OKLab dE per pixel",
             "debug".blue().bold(),
@@ -465,9 +613,52 @@ fn run(config: &Config) {
     }
 }
 
-/// `<OUTPUT>` with its extension replaced by `.jsonl`.
-fn jsonl_path(output: &Path) -> PathBuf {
-    output.with_extension("jsonl")
+/// Encode interleaved RGB in memory.
+fn encode(data: &[u8], width: usize, height: usize, format: image::ImageFormat) -> Vec<u8> {
+    let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
+        .unwrap_or_else(|| error_out!("internal error: image buffer has the wrong size"));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, format)
+        .unwrap_or_else(|e| error_out!("could not encode {format:?}: {e}"));
+    out.into_inner()
+}
+
+/// Write interleaved RGB straight to a PNG file (`--render`).
+fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
+    let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
+        .unwrap_or_else(|| error_out!("internal error: canvas has the wrong size"));
+    img.save(path).unwrap_or_else(|e| {
+        error_out!(
+            "could not write '{}': {}",
+            path.display().to_string().yellow(),
+            e.to_string().red()
+        );
+    });
+}
+
+/// `YYYY-MM-DD` from a Unix timestamp, **UTC**.
+///
+/// UTC, not local: `std::time` has no time zone at all, and the alternatives
+/// are a calendar dependency or shelling out to `date` — neither worth it for
+/// one line of page furniture. Near midnight the page can therefore name the
+/// neighbouring day.
+///
+/// Howard Hinnant's `civil_from_days`, which is the whole of what a date crate
+/// would give us here: the page prints one date and nothing else needs a
+/// calendar.
+fn date(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// One `debug: <stage> <time>` line.
@@ -480,4 +671,14 @@ fn debug_line(stage: &str, d: Duration, note: Option<String>) {
         d.as_secs_f64(),
         note
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dates_match_the_calendar() {
+        assert_eq!(super::date(0), "1970-01-01");
+        assert_eq!(super::date(1_000_000_000), "2001-09-09");
+        assert_eq!(super::date(1_767_225_600), "2026-01-01");
+    }
 }

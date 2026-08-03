@@ -7,8 +7,13 @@
 //!
 //! Phase 2: the [`color`] and [`pattern`] tables the fit is made of, the
 //! [`solver`] that uses them — greedy fill, windowed beam refinement,
-//! perturbation rounds and the [`oklab`] final pass — and the composed preview
-//! it writes. Block matching and export are phase 3.
+//! perturbation rounds and the [`oklab`] final pass — and the composed banner
+//! wall it renders.
+//!
+//! Phase 3: the [`block`] table and the background matcher behind the banners,
+//! the [`preview`] downscale both compare panes go through, and [`export`] —
+//! the NBT writer, the `.schem` / `.litematic` schematics and the
+//! self-contained HTML page that is the tool's output.
 //!
 //! The binary is a one-line shim over [`app::run_cli`]: everything real lives
 //! here, so it is reachable (and reviewable) as library API.
@@ -21,14 +26,17 @@
 static ALLOCATOR: memory::Tracking = memory::Tracking;
 
 pub mod app;
+pub mod block;
 pub mod cli;
 pub mod color;
+pub mod export;
 pub mod geometry;
 pub mod layout;
 pub mod logger;
 pub mod memory;
 pub mod oklab;
 pub mod pattern;
+pub mod preview;
 pub mod resample;
 pub mod simd;
 pub mod solver;

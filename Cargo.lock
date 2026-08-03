@@ -169,6 +169,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "colored",
+ "flate2",
  "image",
  "rayon",
  "rust-embed",

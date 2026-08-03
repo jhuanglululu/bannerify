@@ -23,4 +23,4 @@
 mod pipeline;
 mod weights;
 
-pub use pipeline::{ColBand, ColumnPlan, Plan, PlanarU8, Window};
+pub use pipeline::{ColBand, ColumnPlan, InterleavedU8, Plan, PlanarU8, Source, Window};

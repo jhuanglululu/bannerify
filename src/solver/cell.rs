@@ -32,9 +32,10 @@
 //! internal to one column item: no other item reads or writes these bytes, so
 //! the result does not depend on scheduling.
 
+use crate::block::TEXTURE_BYTES;
 use crate::geometry::{
-    BANNER_H, BANNER_W, BLOCK_SIDE, HIDDEN_H, NTOP_HW, PAD_SIDE, PAD_TOP, TOP_HW, VISIBLE_H,
-    offset_column, offset_row,
+    BANNER_H, BANNER_W, BLOCK_PIXELS, BLOCK_SIDE, HIDDEN_H, NTOP_HW, PAD_SIDE, PAD_TOP, TOP_HW,
+    VISIBLE_H, offset_column, offset_row,
 };
 use crate::resample::ColBand;
 use crate::solver::workspace::Plane;
@@ -44,21 +45,6 @@ const CHANNELS: usize = 3;
 
 /// Bytes in one row of a column strip.
 pub const STRIP_PITCH: usize = BLOCK_SIDE * CHANNELS;
-
-/// Preview background over the block rows banner row 0 covers.
-///
-/// Stage 2a only: the two backgrounds make the top-row split visible at a
-/// glance — white means "these rows come from the full 20×40 patch", grey means
-/// "these come from a 24-row one". Phase 3 replaces both with matched block
-/// textures. The rule is about wall `y`, so it is unaffected by how the wall is
-/// cut into work items.
-pub const BG_TOP: [u8; CHANNELS] = [255, 255, 255];
-/// Preview background everywhere else.
-pub const BG_REST: [u8; CHANNELS] = [48, 48, 48];
-
-/// Wall rows painted [`BG_TOP`]: the first two block rows, which is the region
-/// banner row 0's 40-row patch reaches into.
-const BG_TOP_ROWS: usize = 2 * BLOCK_SIDE;
 
 /// Wall rows of banner row `row`'s patch, its height in rows, and the element
 /// offset at which it starts inside a [`Plane`].
@@ -108,6 +94,23 @@ impl<'a> BandView<'a> {
         }
     }
 
+    /// One wall pixel of one channel, or the pad colour where the band does not
+    /// reach. The block matcher gathers scattered pixels rather than runs, so
+    /// it addresses the band one sample at a time.
+    #[inline]
+    pub fn pixel(&self, y: usize, x: usize, ch: usize) -> f32 {
+        let Some(band) = self.band else {
+            return self.fallback[ch];
+        };
+        let (Some(by), Some(bx)) = (
+            y.checked_sub(self.y).filter(|y| *y < band.height),
+            x.checked_sub(self.x).filter(|x| *x < band.width),
+        ) else {
+            return self.fallback[ch];
+        };
+        band.row(ch, by)[bx]
+    }
+
     /// Gather the patch of banner cell `(row, col)` into `target`, planar and
     /// row-major — the layout [`crate::pattern`] documents, so target planes and
     /// pattern planes zip lane for lane.
@@ -140,20 +143,20 @@ impl<'a> BandView<'a> {
     }
 }
 
-/// Paint the preview background over a whole column strip.
+/// Paint one matched block's texture into its column strip.
 ///
-/// The strip is [`BLOCK_SIDE`] pixels wide and starts at wall row 0, so a strip
-/// row index *is* a wall row. Cells are painted over this afterwards, so what
-/// stays visible is the 2-pixel gap either side of each banner and the padding
-/// above the first and below the last banner row.
-pub fn paint_background(strip: &mut [u8]) {
-    for (y, row) in strip.chunks_exact_mut(STRIP_PITCH).enumerate() {
-        let color = if y < BG_TOP_ROWS { BG_TOP } else { BG_REST };
-        for px in row.chunks_exact_mut(CHANNELS) {
-            px.copy_from_slice(&color);
-        }
-    }
+/// The strip is [`BLOCK_SIDE`] pixels wide and starts at wall row 0, so block
+/// row `row` owns exactly strip rows `row·24 .. row·24+24` — one contiguous
+/// [`TEXTURE_BYTES`] run, which is why this is a single `copy_from_slice`.
+/// Banners are painted over it afterwards, so what stays visible is precisely
+/// the hollow frame the matcher scored ([`crate::block`]).
+pub fn paint_block(strip: &mut [u8], row: usize, texture: &[u8; TEXTURE_BYTES]) {
+    let start = row * BLOCK_SIDE * STRIP_PITCH;
+    strip[start..start + TEXTURE_BYTES].copy_from_slice(texture);
 }
+
+const _: () = assert!(TEXTURE_BYTES == BLOCK_SIDE * STRIP_PITCH);
+const _: () = assert!(BLOCK_PIXELS == BLOCK_SIDE * BLOCK_SIDE);
 
 /// Paint one solved cell's composite into its column strip.
 ///

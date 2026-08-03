@@ -5,14 +5,13 @@
 //! step, so there is no `resize` subcommand: the user names a wall size in
 //! banner rows or columns and the pipeline does the rest.
 //!
-//! Every "Generation" and "Refinement" option is live as of solver stage 2b.
-//! `--exclude-blocks` is the one that still does nothing: block matching is
-//! phase 3, and its help text says so.
+//! Every option is live as of phase 3 — `--exclude-blocks` was the last inert
+//! one and the background matcher now honours it.
 //!
 //! `--debug` is logging only: per-stage timings and memory, no file dumping.
-//! While the pipeline is partial the tool's normal output is the current step's
-//! intermediate, so there is nothing extra to dump: today `<OUTPUT>` is the
-//! composed banner wall and `<OUTPUT>.jsonl` the per-cell solution.
+//! The pipeline is complete, so `<OUTPUT>` is the finished HTML export; the
+//! full-resolution wall render is a separate opt-in file (`--render PATH`)
+//! rather than an intermediate the tool always drops beside the output.
 
 use std::path::PathBuf;
 
@@ -32,10 +31,8 @@ pub mod config;
 pub struct Args {
     /// Input image path
     pub input: PathBuf,
-    /// Output path (an HTML export once the pipeline is complete; for now it
-    /// receives this stage's intermediates: the composed banner wall as a PNG,
-    /// and the per-cell solution as JSONL at the same path with a .jsonl
-    /// extension)
+    /// Output path: one self-contained HTML page with the preview, the crafting
+    /// guide and the .schem / .litematic downloads embedded in it
     pub output: PathBuf,
 
     /// Height of output in blocks (number of banner rows + 1)
@@ -63,6 +60,17 @@ pub struct Args {
     #[arg(short = 's', long, value_name = "SEED")]
     pub seed: Option<u64>,
 
+    /// Largest dimension of the preview images embedded in the HTML
+    /// [default: the input image's own size]; never larger than the wall
+    /// itself, since upscaling a banner wall only inflates the file
+    #[arg(long, value_name = "PIXELS")]
+    pub preview: Option<usize>,
+
+    /// Also write the full-resolution banner wall to this PNG path; it is NOT
+    /// embedded in the HTML, whose preview is the downscaled one
+    #[arg(long, value_name = "PATH")]
+    pub render: Option<PathBuf>,
+
     /// Fit image, preserving aspect ratio [default]
     #[arg(help_heading = "Layout")]
     #[arg(long)]
@@ -82,7 +90,8 @@ pub struct Args {
     #[arg(short = 'P', long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
-    /// Block ids to exclude (comma-separated) [inert until phase 3]
+    /// Block ids to exclude (comma-separated), e.g. 'beacon,ancient_debris';
+    /// the background matcher never picks an excluded block
     #[arg(help_heading = "Generation")]
     #[arg(short = 'B', long, value_name = "BLOCKS")]
     pub exclude_blocks: Option<String>,

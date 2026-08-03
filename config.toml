@@ -4,13 +4,22 @@
 # Every key here is optional, and any value given on the command line wins over
 # the value in this file.
 #
-# Phase 1 status: the layout keys (workers, fit/stretch/fill) are live. The
-# generation and refinement keys are parsed and validated but INERT — they do
-# nothing until the phase-2 solver lands.
+# Every key below is live as of phase 3.
 
 # default is blank, put a number if you want to limit the workers
 # keeping it blank is the most performance option
 # workers =
+
+# * Output Options *
+
+# largest dimension of the preview images embedded in the HTML export
+# default is the input image's own size; either way it is never larger than
+# the banner wall itself
+# preview = 1200
+
+# also write the full-resolution banner wall to this PNG path
+# it is NOT embedded in the HTML, whose preview is the downscaled one
+# render = "wall.png"
 
 # * Resizing Methods *
 # exactly one of fit / stretch / fill may be set
@@ -27,7 +36,7 @@ stretch = false
 # allowed formats: '#ff9453', 'rgb(114, 5, 14)', '9,4,87'
 # fill = COLOR
 
-# * Generation Options *  [inert until phase 2]
+# * Generation Options *
 
 # patterns in the list will not be used
 exclude_patterns = []
@@ -46,7 +55,7 @@ layer_range = [4, 6]
 # number of candidates for the perceptual (OKLab) refinement pass
 # lab_refine = 5
 
-# * Refinement Options *  [inert until phase 2]
+# * Refinement Options *
 
 # number of pass that refinement can try
 # setting this number above 3 will most likely do nothing
