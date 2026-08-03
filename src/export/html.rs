@@ -28,7 +28,9 @@
 //! r, c        rows, columns
 //! p, n        pattern ids / display names, indexed by layer entries
 //! d, l, h     dye ids / display names / #rrggbb, indexed by base and layers
+//! b           block ids, indexed by `k`
 //! g[row][col] = [base, pattern, dye, pattern, dye, ...]
+//! k[row][col] = the block behind that banner
 //! ```
 //!
 //! A cell is a flat little integer array — about a dozen bytes — because the
@@ -46,10 +48,6 @@ pub struct Report<'a> {
     pub input: &'a str,
     /// Base name for the downloaded files (no extension).
     pub stem: &'a str,
-    /// `YYYY-MM-DD` of the run.
-    pub date: &'a str,
-    /// Wall-clock seconds the render took.
-    pub seconds: f64,
     /// The preview PNG, encoded.
     pub preview: &'a [u8],
     /// The original image, encoded, at the preview's size.
@@ -91,16 +89,12 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     // ---- header ------------------------------------------------------------
     out.push_str(&format!(
         "<h1>{}<span class=\"ext\">{}</span></h1>\n\n\
-         <p><strong>{} rows × {} columns</strong> · {} banners · {} dye · \
-         rendered in {} · <span class=\"muted\">{}</span></p>\n\n",
+         <p><strong>{} rows × {} columns</strong> · {} banners</p>\n\n",
         escape(&stem),
         escape(&ext),
         thousands(wall.rows),
         thousands(wall.columns),
         thousands(wall.banners()),
-        thousands(materials.total_dye()),
-        duration(report.seconds),
-        escape(report.date),
     ));
 
     // ---- downloads ---------------------------------------------------------
@@ -134,9 +128,8 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     // ---- compare slider ----------------------------------------------------
     let (pw, ph) = report.size;
     out.push_str(&format!(
-        "<h2>Preview</h2>\n\n\
-         <p class=\"muted\">Drag the slider to compare the original image with \
-         the generated banner wall.</p>\n\n\
+        "<h2>Preview <span class=\"hint\">drag the slider to compare the \
+         original with the generated wall</span></h2>\n\n\
          <div class=\"compare\" id=\"compare\" style=\"--split:50%;aspect-ratio:{pw}/{ph}\">\n"
     ));
     out.push_str(&format!(
@@ -156,21 +149,32 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     );
 
     // ---- crafting guide ----------------------------------------------------
+    // Two columns: the picker, the address line and the give command on the
+    // left, the step table on the right — the table is the tall element, and
+    // pairing it with the short controls halves the section's height. The
+    // shell is static and the lookup only fills three holes in it, which keeps
+    // the JavaScript to what it is allowed to be (see the module docs).
     out.push_str(&format!(
-        "<h2>Crafting guide</h2>\n\n\
-         <p class=\"muted\">Rows are numbered 1–{} top to bottom, columns 1–{} \
-         left to right.</p>\n\n\
-         <div class=\"jump\">\n\
-         \x20 <label for=\"row-in\">Row</label><input id=\"row-in\" value=\"1\" inputmode=\"numeric\" oninput=\"showBanner()\">\n\
-         \x20 <label for=\"col-in\">Column</label><input id=\"col-in\" value=\"1\" inputmode=\"numeric\" oninput=\"showBanner()\">\n\
-         </div>\n\n\
-         <div id=\"banner-detail\"></div>\n\n",
+        "<h2>Crafting guide <span class=\"hint\">rows 1–{} top to bottom, \
+         columns 1–{} left to right</span></h2>\n\n\
+         <div class=\"craft\">\n\
+         \x20 <div>\n\
+         \x20   <div class=\"jump\">\n\
+         \x20     <label for=\"row-in\">Row</label><input id=\"row-in\" value=\"1\" inputmode=\"numeric\" oninput=\"showBanner()\">\n\
+         \x20     <label for=\"col-in\">Column</label><input id=\"col-in\" value=\"1\" inputmode=\"numeric\" oninput=\"showBanner()\">\n\
+         \x20   </div>\n\
+         \x20   <p id=\"banner-meta\"></p>\n\
+         \x20   <pre id=\"give\"></pre>\n\
+         \x20   <div class=\"btn-row\"><button class=\"btn\" onclick=\"copyGive(this)\">Copy command</button></div>\n\
+         \x20 </div>\n\
+         \x20 <div id=\"banner-steps\"></div>\n\
+         </div>\n\n",
         thousands(wall.rows),
         thousands(wall.columns),
     ));
 
     // ---- materials ---------------------------------------------------------
-    out.push_str("<h2>Materials</h2>\n\n<table>\n<tr><th>Item</th><th>Count</th></tr>\n");
+    out.push_str("<h2>Materials <span class=\"hint\">everything the banners cost</span></h2>\n\n");
     let mut items: Vec<(usize, String, usize)> = Vec::new();
     for c in 0..NUM_COLORS {
         if materials.wool[c] > 0 {
@@ -183,39 +187,43 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
         }
     }
     items.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
-    for (color, label, count) in items {
-        out.push_str(&format!(
-            "<tr><td><span class=\"swatch\" style=\"background:{}\"></span>{}</td>\
-             <td class=\"num\">{}</td></tr>\n",
-            hex(color),
-            escape(&label),
-            thousands(count)
-        ));
-    }
-    out.push_str("</table>\n\n");
+    kv_grid(
+        &mut out,
+        items.iter().map(|(color, label, count)| {
+            (
+                format!(
+                    "<span class=\"swatch\" style=\"background:{}\"></span>{}",
+                    hex(*color),
+                    escape(label)
+                ),
+                thousands(*count),
+            )
+        }),
+    );
 
     // ---- the blocks behind the banners -------------------------------------
     let blocks = block_counts(wall);
     out.push_str(&format!(
-        "<h2>Wall blocks</h2>\n\n\
-         <p class=\"muted\">{} block types across {} positions — the wall the \
-         banners hang on. Both schematics place them.</p>\n\n\
-         <table>\n<tr><th>Block</th><th>Count</th></tr>\n",
+        "<h2>Wall blocks <span class=\"hint\">{} types over {} positions, \
+         placed by both schematics</span></h2>\n\n",
         thousands(blocks.len()),
         thousands(wall.block_rows() * wall.columns),
     ));
-    for (name, count) in &blocks {
-        out.push_str(&format!(
-            "<tr><td><code class=\"inline\">{}</code></td><td class=\"num\">{}</td></tr>\n",
-            escape(name),
-            thousands(*count)
-        ));
-    }
-    out.push_str("</table>\n\n<hr>\n\n");
+    kv_grid(
+        &mut out,
+        blocks.iter().map(|(name, count)| {
+            (
+                format!("<code class=\"inline\">{}</code>", escape(name)),
+                thousands(*count),
+            )
+        }),
+    );
+
+    out.push_str("<hr>\n\n");
 
     out.push_str(
-        "<blockquote><p>Generated by <a href=\"https://github.com/jhuanglululu/bannerify\">bannerify</a>. \
-         Preview is a single pre-rendered image; no client-side rendering.</p></blockquote>\n\n",
+        "<blockquote><p>Generated by \
+         <a href=\"https://github.com/jhuanglululu/bannerify\">bannerify</a>.</p></blockquote>\n\n",
     );
     out.push_str("</div>\n<script>\nconst DATA = ");
     blob(&mut out, wall);
@@ -225,21 +233,24 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     out
 }
 
-/// A wall-clock duration, in the units a reader wants: tenths under ten
-/// seconds (where `{:.0}` would print a bare "0"), whole seconds up to an hour,
-/// minutes and seconds beyond.
-fn duration(seconds: f64) -> String {
-    if seconds < 10.0 {
-        format!("{seconds:.1} s")
-    } else if seconds < 3600.0 {
-        format!("{seconds:.0} s")
-    } else {
-        format!(
-            "{} min {} s",
-            (seconds / 60.0) as u64,
-            (seconds % 60.0) as u64
-        )
+/// A list of `(item, count)` pairs, flowed into as many `Item · Count` columns
+/// as the viewport fits.
+///
+/// A single two-column table would be a metre of scrolling for the sixteen dye
+/// colours and rather more for the blocks, and a table with a *fixed* number of
+/// repeated column pairs cannot narrow without hiding data. So the pairs are
+/// grid items instead: `auto-fill` picks the column count from the available
+/// width, filling left to right, and collapses to one column on a phone with
+/// nothing lost. `item` is trusted HTML (a swatch or a `<code>` id); the
+/// callers escape their own text.
+fn kv_grid(out: &mut String, entries: impl Iterator<Item = (String, String)>) {
+    out.push_str("<div class=\"kv-grid\">\n");
+    for (item, count) in entries {
+        out.push_str(&format!(
+            "  <div class=\"kv\"><span>{item}</span><span class=\"num\">{count}</span></div>\n"
+        ));
     }
+    out.push_str("</div>\n\n");
 }
 
 /// One `data:` download button.
@@ -292,6 +303,8 @@ fn blob(out: &mut String, wall: &Wall<'_>) {
         strings(&(0..NUM_COLORS).map(hex).collect::<Vec<_>>())
     ));
 
+    out.push_str(&format!("\"b\":{},", strings(&wall.blocks.names)));
+
     out.push_str("\"g\":[");
     for row in 0..wall.rows {
         if row > 0 {
@@ -309,6 +322,24 @@ fn blob(out: &mut String, wall: &Wall<'_>) {
                 out.push_str(&format!(",{p},{dye}"));
             }
             out.push(']');
+        }
+        out.push(']');
+    }
+
+    // The block a banner hangs on is the one at its own block row — the same
+    // Y the schematics give them (`crate::export::schematic`). The block row
+    // below is the one the banner droops over, and is somebody else's banner's.
+    out.push_str("],\"k\":[");
+    for row in 0..wall.rows {
+        if row > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        for col in 0..wall.columns {
+            if col > 0 {
+                out.push(',');
+            }
+            out.push_str(&wall.block_ids[col][row].to_string());
         }
         out.push(']');
     }
@@ -344,11 +375,12 @@ body{
   font-size:16px;line-height:1.5;
   -webkit-font-smoothing:antialiased;
 }
-.markdown-body{max-width:1012px;margin:0 auto;padding:32px 24px 88px}
+.markdown-body{max-width:880px;margin:0 auto;padding:56px 40px 104px}
 
 h1{font-size:2em;font-weight:600;padding-bottom:.3em;border-bottom:1px solid var(--border-muted);margin:0 0 16px}
 h1 .ext{color:var(--fg-muted);font-weight:400}
 h2{font-size:1.5em;font-weight:600;padding-bottom:.3em;border-bottom:1px solid var(--border-muted);margin:40px 0 16px}
+h2 .hint{font-size:14px;font-weight:400;color:var(--fg-muted);margin-left:10px;letter-spacing:0}
 p{margin:0 0 16px}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
@@ -383,6 +415,23 @@ th,td{border:1px solid var(--border);padding:6px 13px;text-align:left}
 th{font-weight:600}
 tr:nth-child(even) td{background:var(--canvas-subtle)}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* item/count pairs, flowed into as many columns as fit */
+.kv-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:0 28px;margin:0 0 16px;border-top:1px solid var(--border);
+}
+.kv{
+  display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+  font-size:15px;padding:5px 2px;border-bottom:1px solid var(--border);
+}
+.kv .num{text-align:right;font-variant-numeric:tabular-nums;color:var(--fg-muted)}
+
+/* crafting guide: controls + command beside the step table */
+.craft{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1.15fr);gap:8px 32px;align-items:start}
+.craft pre{white-space:pre-wrap;word-break:break-all}
+.craft table{width:100%}
+@media (max-width:720px){.craft{grid-template-columns:1fr}}
 
 .swatch{
   display:inline-block;width:13px;height:13px;border-radius:3px;
@@ -445,21 +494,29 @@ function swatch(dye) {
 }
 
 function showBanner() {
-  const el = document.getElementById('banner-detail');
+  const meta = document.getElementById('banner-meta');
+  const steps = document.getElementById('banner-steps');
+  const give = document.getElementById('give');
   const r = parseInt(document.getElementById('row-in').value, 10);
   const c = parseInt(document.getElementById('col-in').value, 10);
   if (!(r >= 1 && r <= DATA.r && c >= 1 && c <= DATA.c)) {
-    el.innerHTML = '<p class="muted">Pick a row between 1 and ' + group(DATA.r) +
-      ', and a column between 1 and ' + group(DATA.c) + '.</p>';
+    meta.innerHTML = '<span class="muted">Pick a row between 1 and ' + group(DATA.r) +
+      ', and a column between 1 and ' + group(DATA.c) + '.</span>';
+    give.textContent = '';
+    steps.innerHTML = '';
     return;
   }
   const cell = cellAt(r - 1, c - 1);
   const index = (r - 1) * DATA.c + c;
-  let html = '<p><strong>Row ' + group(r) + ', Column ' + group(c) + '</strong> ' +
-    '<span class="muted">— banner ' + group(index) + ' of ' + group(DATA.r * DATA.c) + '</span></p>';
-  html += '<table>\n<tr><th>Step</th><th>Pattern</th><th>Dye</th></tr>\n';
+  meta.innerHTML = '<strong>Row ' + group(r) + ', Column ' + group(c) + '</strong> ' +
+    '<span class="muted">— banner ' + group(index) + ' of ' + group(DATA.r * DATA.c) + '</span>';
+  give.textContent = giveCommand(cell);
+
+  let html = '<table>\n<tr><th>Step</th><th>Pattern</th><th>Dye</th></tr>\n';
   html += '<tr><td class="num">—</td><td>Base</td><td>' + swatch(cell[0]) +
     DATA.l[cell[0]] + ' wool + stick</td></tr>\n';
+  html += '<tr><td class="num">—</td><td>Wall block</td><td><code class="inline">' +
+    DATA.b[DATA.k[r - 1][c - 1]] + '</code></td></tr>\n';
   let step = 0;
   for (let i = 1; i < cell.length; i += 2) {
     step += 1;
@@ -467,11 +524,7 @@ function showBanner() {
       swatch(cell[i + 1]) + DATA.l[cell[i + 1]] + ' dye</td></tr>\n';
   }
   html += '</table>\n';
-  html += '<p>Or give it directly:</p>';
-  const cmd = giveCommand(cell);
-  html += '<pre id="give">' + cmd.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
-  html += '<div class="btn-row"><button class="btn" onclick="copyGive(this)">Copy command</button></div>';
-  el.innerHTML = html;
+  steps.innerHTML = html;
 }
 
 function downloadPreview(filename) {

@@ -506,8 +506,6 @@ fn run(config: &Config) {
     let report = html::Report {
         input: &input_name,
         stem: &stem,
-        date: &date(now.as_secs() as i64),
-        seconds: started.elapsed().as_secs_f64(),
         preview: &preview_png,
         original: &original_jpeg,
         original_mime: "image/jpeg",
@@ -636,31 +634,6 @@ fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
     });
 }
 
-/// `YYYY-MM-DD` from a Unix timestamp, **UTC**.
-///
-/// UTC, not local: `std::time` has no time zone at all, and the alternatives
-/// are a calendar dependency or shelling out to `date` — neither worth it for
-/// one line of page furniture. Near midnight the page can therefore name the
-/// neighbouring day.
-///
-/// Howard Hinnant's `civil_from_days`, which is the whole of what a date crate
-/// would give us here: the page prints one date and nothing else needs a
-/// calendar.
-fn date(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 /// One `debug: <stage> <time>` line.
 fn debug_line(stage: &str, d: Duration, note: Option<String>) {
     let note = note.map(|n| format!("   {n}")).unwrap_or_default();
@@ -671,14 +644,4 @@ fn debug_line(stage: &str, d: Duration, note: Option<String>) {
         d.as_secs_f64(),
         note
     );
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn dates_match_the_calendar() {
-        assert_eq!(super::date(0), "1970-01-01");
-        assert_eq!(super::date(1_000_000_000), "2001-09-09");
-        assert_eq!(super::date(1_767_225_600), "2026-01-01");
-    }
 }
