@@ -1,19 +1,31 @@
-//! Streamed lanczos-3, sliced by output row band.
+//! Streamed lanczos-3, sliced by output **column** band.
 //!
-//! The unit of work is a **band of output rows** ([`RowPlan`]), resampled by
-//! its owner into a closure-local [`RowBand`] — that is the pipeline's parallel
-//! work item (see `context/designs/pipeline.md`), so this module hands out no
-//! parallelism of its own and orchestrates nothing.
+//! The unit of work is a band of output columns ([`ColumnPlan`]), resampled by
+//! its owner into a closure-local [`ColBand`] — that is the pipeline's parallel
+//! work item (one block column; see `context/designs/pipeline.md`), so this
+//! module hands out no parallelism of its own and orchestrates nothing.
 //!
 //! Inside a band: a ring of `ksize_y` horizontally-resampled rows is filled by
 //! the H pass (ring indexing — rows are never shifted or copied), and each
 //! output row is a `ksize_y`-tap weighted sum of the ring straight into the band
 //! buffer. Nothing wall-sized is ever materialised here; a band's working set is
-//! `(ksize_y + band_height) * padded_width * 4` bytes per channel.
+//! `(ksize_y + dst_height) * padded_band_width * 4` bytes per channel, plus one
+//! source-row scratch.
 //!
-//! The horizontal weight table is expensive to build (a lanczos evaluation per
-//! output pixel per tap) and identical for every band, so it lives in the shared
-//! [`Plan`]; only the small vertical table is per band.
+//! ## Which table is shared
+//!
+//! A weight table costs one lanczos evaluation per output coordinate per tap,
+//! and every band on an axis wants the same coefficients — so the axis that is
+//! **not** cut belongs in the shared [`Plan`]. With column items that is the
+//! vertical axis: [`Plan`] holds the full-height [`VWeights`], and each column
+//! item builds the small [`HWeights`] for its own handful of output columns
+//! inside the closure (parallel, and proportional to the band, not the wall).
+//! This is the mirror image of the banner-row split this module used to have.
+//!
+//! Sub-window weights are exact, not approximate: the coefficient for output
+//! `j` of a band starting at output `c` is centred at
+//! `x0 + (c + j + 0.5) * scale`, which is what the whole-image table would put
+//! at output `c + j`. Banding is invisible in the result on either axis.
 
 use std::ops::Range;
 
@@ -83,17 +95,14 @@ impl Window {
 }
 
 /// The shared, immutable half of a resize: source geometry, target size, and the
-/// horizontal weight table. Build once, borrow from every work item.
+/// vertical weight table. Build once, borrow from every work item.
 pub struct Plan {
     src_width: usize,
     src_height: usize,
     window: Window,
+    dst_width: usize,
     dst_height: usize,
-    h: HWeights,
-    /// Row pitch of band buffers, in floats (multiple of 16).
-    out_stride: usize,
-    /// Padded length of the H-pass source row scratch buffer.
-    src_stride: usize,
+    v: VWeights,
 }
 
 impl Plan {
@@ -116,22 +125,20 @@ impl Plan {
         dst_width: usize,
         dst_height: usize,
     ) -> Self {
-        let h = HWeights::new(src_width, window.x0, window.x1, dst_width);
-        let src_stride = h.src_padded_len(src_width);
+        let v = VWeights::new(src_height, window.y0, window.y1, dst_height);
         Self {
             src_width,
             src_height,
             window,
+            dst_width,
             dst_height,
-            h,
-            out_stride: round_up(dst_width, 16),
-            src_stride,
+            v,
         }
     }
 
     /// Output width in pixels.
     pub fn dst_width(&self) -> usize {
-        self.h.out_len
+        self.dst_width
     }
 
     /// Output height in pixels.
@@ -139,76 +146,90 @@ impl Plan {
         self.dst_height
     }
 
-    /// The source rows band `rows` reads from, in fractional source pixels.
+    /// The source columns band `cols` reads from, in fractional source pixels.
     ///
-    /// Adjacent bands overlap by the vertical kernel support (~`6 * scale`
-    /// rows): every band is computed independently from the source, so the
-    /// overlap is re-read (and re-H-passed), never shared.
-    pub fn src_rows(&self, rows: &Range<usize>) -> (f64, f64) {
-        let scale = (self.window.y1 - self.window.y0) / self.dst_height as f64;
+    /// Adjacent bands overlap here by the horizontal kernel support (~`3 *
+    /// scale` columns each side): every band is computed independently from the
+    /// source, so the overlap is re-read (and re-H-passed), never shared. That
+    /// duplicate work is the accepted cost of the column split — it replaces the
+    /// vertical tap overlap the banner-row split used to pay.
+    pub fn src_cols(&self, cols: &Range<usize>) -> (f64, f64) {
+        let scale = (self.window.x1 - self.window.x0) / self.dst_width as f64;
         (
-            self.window.y0 + rows.start as f64 * scale,
-            self.window.y0 + rows.end as f64 * scale,
+            self.window.x0 + cols.start as f64 * scale,
+            self.window.x0 + cols.end as f64 * scale,
         )
     }
 
-    /// The plan for one band of output rows.
-    ///
-    /// The band's vertical weights are computed for the sub-window `rows` maps
-    /// to, so the coefficients are the same ones the whole-image plan would
-    /// produce for those rows — banding is invisible in the result.
-    pub fn rows(&self, rows: Range<usize>) -> RowPlan<'_> {
-        assert!(rows.end <= self.dst_height, "band outside the output");
-        self.band(self.src_rows(&rows), rows.len())
+    /// The plan for one band of output columns, full output height.
+    pub fn columns(&self, cols: Range<usize>) -> ColumnPlan<'_> {
+        assert!(cols.end <= self.dst_width, "band outside the output");
+        self.band(self.src_cols(&cols), cols.len())
     }
 
-    /// The plan for `height` output rows covering the source interval
-    /// `src_rows` — the same thing [`Plan::rows`] builds, addressed by the work
-    /// item's own source rect instead of by output row indices.
-    pub fn band(&self, src_rows: (f64, f64), height: usize) -> RowPlan<'_> {
-        assert!(height > 0, "empty band");
-        RowPlan {
+    /// The plan for `width` output columns covering the source interval
+    /// `src_cols` — the same thing [`Plan::columns`] builds, addressed by the
+    /// work item's own source rect instead of by output column indices.
+    pub fn band(&self, src_cols: (f64, f64), width: usize) -> ColumnPlan<'_> {
+        assert!(width > 0, "empty band");
+        let h = HWeights::new(self.src_width, src_cols.0, src_cols.1, width);
+        let src_stride = h.src_padded_len(self.src_width);
+        ColumnPlan {
             plan: self,
-            v: VWeights::new(self.src_height, src_rows.0, src_rows.1, height),
-            height,
+            h,
+            width,
+            src_stride,
+            out_stride: round_up(width, 16),
         }
     }
 }
 
-/// The plan for one band of output rows: the shared [`Plan`] plus the band's own
-/// vertical weights.
-pub struct RowPlan<'a> {
+/// The plan for one band of output columns: the shared [`Plan`] plus the band's
+/// own horizontal weights.
+pub struct ColumnPlan<'a> {
     plan: &'a Plan,
-    v: VWeights,
-    height: usize,
+    h: HWeights,
+    width: usize,
+    /// Padded length of the H-pass source row scratch buffer.
+    src_stride: usize,
+    /// Row pitch of the band buffer, in floats (multiple of 16).
+    out_stride: usize,
 }
 
-impl RowPlan<'_> {
-    /// Output rows in this band.
-    pub fn height(&self) -> usize {
-        self.height
+impl ColumnPlan<'_> {
+    /// Output columns in this band.
+    pub fn width(&self) -> usize {
+        self.width
     }
 
     /// Resample this band out of `src`.
     ///
-    /// The returned [`RowBand`] is the caller's local: the phase-2 solver
-    /// borrows its cell patches straight out of it, and it dies with the work
-    /// item. Note for later: these per-item buffers (band + ring + scratch) are
-    /// a natural fit for a per-worker arena handed out without zeroing, which
-    /// would remove the per-item allocation traffic entirely.
-    pub fn resample(&self, src: &PlanarU8) -> RowBand {
+    /// The returned [`ColBand`] is the caller's local: the solver borrows its
+    /// cell patches straight out of it, and it dies with the work item. Note for
+    /// later: these per-item buffers (band + ring + scratch) are a natural fit
+    /// for a per-worker arena handed out without zeroing, which would remove the
+    /// per-item allocation traffic entirely.
+    pub fn resample(&self, src: &PlanarU8) -> ColBand {
         let plan = self.plan;
         assert_eq!(src.width, plan.src_width, "source width mismatch");
         assert_eq!(src.height, plan.src_height, "source height mismatch");
 
-        let height = self.height;
-        let stride = plan.out_stride;
-        let kv = self.v.ksize;
+        let height = plan.dst_height;
+        let stride = self.out_stride;
+        let kv = plan.v.ksize;
 
-        // Source row scratch: `zeroed` so the tail past `src_width` reads as a
-        // finite 0.0 for the padded window; the first `src_width` floats are
-        // overwritten for every row loaded.
-        let mut srow = AlignedVec::zeroed(plan.src_stride);
+        // The only source columns this band's H pass ever touches. Tap windows
+        // start at `start_lane * LANES` and are `win` floats long, and
+        // `start_lane` is non-decreasing across outputs, so the whole band reads
+        // exactly this span — a sliver of each source row, which is the point of
+        // loading a span rather than the row.
+        let x_lo = self.h.start_lane[0] * LANES;
+        let x_hi = (self.h.start_lane[self.width - 1] * LANES + self.h.win).min(plan.src_width);
+
+        // Source row scratch: `zeroed`, and only `[x_lo, x_hi)` is ever
+        // rewritten, so both the alignment padding inside a tap window and the
+        // tail past `src_width` read as a finite 0.0 on every row.
+        let mut srow = AlignedVec::zeroed(self.src_stride);
 
         // Ring of `kv` H-passed rows, reused in place across the whole band.
         let mut ring: Vec<AlignedVec> = (0..kv)
@@ -227,13 +248,13 @@ impl RowPlan<'_> {
                 // SAFETY: `v_pass` writes every element of the band buffer —
                 // one full `stride`-float row per output row — before it is read.
                 let mut buf = unsafe { AlignedVec::new_uninit(height * stride) };
-                let mut next_src = self.v.starts[0];
+                let mut next_src = plan.v.starts[0];
                 for local in 0..height {
-                    let (start, taps) = self.v.row(local);
+                    let (start, taps) = plan.v.row(local);
                     for y in next_src.max(start)..start + kv {
                         let clamped = y.min(plan.src_height - 1);
-                        load_row(plane, plan.src_width, clamped, &mut srow);
-                        h_pass(&plan.h, &srow, &mut ring[y % kv]);
+                        load_span(plane, plan.src_width, clamped, (x_lo, x_hi), &mut srow);
+                        h_pass(&self.h, &srow, &mut ring[y % kv]);
                     }
                     next_src = next_src.max(start + kv);
                     v_pass(&ring, kv, start, taps, &mut buf, local, stride);
@@ -242,8 +263,8 @@ impl RowPlan<'_> {
             })
             .collect();
 
-        RowBand {
-            width: plan.dst_width(),
+        ColBand {
+            width: self.width,
             height,
             stride,
             planes,
@@ -251,21 +272,22 @@ impl RowPlan<'_> {
     }
 }
 
-/// One band of resampled output, planar `f32`, one plane per channel.
+/// One band of resampled output — a full-height slice of output columns —
+/// planar `f32`, one plane per channel.
 ///
-/// Rows are padded to a multiple of 16 floats ([`RowBand::stride`]); only the
-/// first [`RowBand::width`] samples of each row are image data.
-pub struct RowBand {
-    /// Valid samples per row.
+/// Rows are padded to a multiple of 16 floats ([`ColBand::stride`]); only the
+/// first [`ColBand::width`] samples of each row are image data.
+pub struct ColBand {
+    /// Valid samples per row: this band's output columns.
     pub width: usize,
-    /// Rows in this band.
+    /// Rows in this band — the full output height.
     pub height: usize,
     /// Row pitch in floats.
     pub stride: usize,
     planes: Vec<AlignedVec>,
 }
 
-impl RowBand {
+impl ColBand {
     /// Number of channels.
     pub fn channels(&self) -> usize {
         self.planes.len()
@@ -279,15 +301,18 @@ impl RowBand {
     }
 }
 
-/// Widen source row `y` into `dst[..src_width]` (u8 → f32 at H-pass load).
-fn load_row(plane: &[u8], src_width: usize, y: usize, dst: &mut AlignedVec) {
-    let row = &plane[y * src_width..(y + 1) * src_width];
-    for (d, &s) in dst[..src_width].iter_mut().zip(row) {
+/// Widen source row `y`, columns `span`, into `dst` at the same indices (u8 →
+/// f32 at H-pass load). Everything outside the span keeps what `dst` already
+/// holds, which is the zero it was constructed with.
+fn load_span(plane: &[u8], src_width: usize, y: usize, span: (usize, usize), dst: &mut AlignedVec) {
+    let (x_lo, x_hi) = span;
+    let row = &plane[y * src_width + x_lo..y * src_width + x_hi];
+    for (d, &s) in dst[x_lo..x_hi].iter_mut().zip(row) {
         *d = f32::from(s);
     }
 }
 
-/// Horizontal pass: one padded source row in, one full output row out.
+/// Horizontal pass: one padded source row in, one band-wide output row out.
 fn h_pass(w: &HWeights, src: &AlignedVec, dst: &mut AlignedVec) {
     let table = w.table.lanes();
     let src_lanes = src.lanes();

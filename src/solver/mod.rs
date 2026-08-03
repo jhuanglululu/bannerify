@@ -8,8 +8,8 @@
 //!
 //! - [`variance`] — the pre-pass that hands each cell a layer budget.
 //! - [`greedy`] — the fill itself, and the reusable [`Workspace`].
-//! - [`cell`] — getting a cell's pixels out of a row band and its composite
-//!   back into the preview strip.
+//! - [`cell`] — getting a cell's pixels out of a column band and its composite
+//!   back into the column's preview strip.
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -28,13 +28,15 @@ pub use greedy::{Solution, Workspace};
 
 /// Write one JSONL line per cell: `{"row","col","base","layers","error"}`.
 ///
-/// `rows[r][c]` is cell `(r, c)`. Written serially after the `par_iter`, from
-/// the collected results — the row items never touch a file.
+/// `cols[c][r]` is cell `(r, c)` — the work items are block columns, so the
+/// results arrive column-major; the file stays **row-major**, which is the
+/// reading order of the wall. Written serially after the `par_iter`, from the
+/// collected results — the column items never touch a file.
 ///
 /// Hand-formatted rather than pulling in `serde_json` for five fields: dye and
 /// pattern ids are `[a-z0-9_]` by construction (asserted below), so no string
 /// in the output needs escaping, and the floats are printed with `{:.6}`.
-pub fn write_jsonl(path: &Path, patterns: &Patterns, rows: &[Vec<Solution>]) {
+pub fn write_jsonl(path: &Path, patterns: &Patterns, cols: &[Vec<Solution>]) {
     debug_assert!(
         patterns
             .names
@@ -54,10 +56,17 @@ pub fn write_jsonl(path: &Path, patterns: &Patterns, rows: &[Vec<Solution>]) {
     });
     let mut out = BufWriter::new(file);
 
+    let rows = cols.first().map_or(0, Vec::len);
+    debug_assert!(
+        cols.iter().all(|col| col.len() == rows),
+        "every column has the same number of cells"
+    );
+
     let mut write = || -> std::io::Result<()> {
         let mut line = String::with_capacity(256);
-        for (r, row) in rows.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
+        for r in 0..rows {
+            for (c, col) in cols.iter().enumerate() {
+                let cell = &col[r];
                 line.clear();
                 line.push_str(&format!(
                     "{{\"row\":{},\"col\":{},\"base\":\"{}\",\"layers\":[",

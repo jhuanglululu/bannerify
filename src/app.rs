@@ -1,11 +1,18 @@
-//! Application entry point: the pipeline as one flat `par_iter` over banner
-//! rows.
+//! Application entry point: the pipeline as one flat `par_iter` over block
+//! columns.
 //!
-//! One work item is one banner row (`context/designs/pipeline.md`): the closure
-//! borrows the source planes, the shared weights, the pattern tables, the layer
-//! grid and the layout, resamples its own row band locally through the windowed
-//! plan, solves its cells against that band, and writes its strip of the wall
-//! canvas — no shared mutable state, no locking, no cross-item handoff.
+//! One work item is one block column (`context/designs/pipeline.md`): a
+//! full-height, 24-pixel-wide slice of the wall. The closure borrows the source
+//! planes, the shared vertical weights, the pattern tables, the layer grid and
+//! the layout; it builds its own horizontal weights, resamples its own column
+//! band locally, solves its cells top to bottom, and paints them into its own
+//! strip — no shared mutable state, no locking, no cross-item handoff.
+//!
+//! Columns, never rows: banners bridge every horizontal block seam, so no
+//! horizontal cut lets an item own complete block rows, while a vertical cut on
+//! a block-column boundary cuts nothing (banners never cross columns). The
+//! banner-over-banner overlap — and, in phase 3, block-behind-banner
+//! compositing — is then entirely internal to an item.
 //!
 //! Phase 2 stops after the greedy fill (stage 2a, `context/plans/2-solver.md`),
 //! so the tool's normal output is that intermediate: the composed banner wall as
@@ -14,7 +21,7 @@
 //! intermediates are deleted when a later stage lands, never kept behind a flag.
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -23,19 +30,239 @@ use rayon::prelude::*;
 
 use crate::cli::Args;
 use crate::cli::config::Config;
-use crate::geometry::{NTOP_HW, TOP_HW, banner_row_span};
+use crate::geometry::{BLOCK_SIDE, NTOP_HW, TOP_HW};
 use crate::layout::Layout;
 use crate::logger::{error_out, info};
 use crate::memory;
 use crate::pattern::{self, Patterns};
 use crate::resample::{Plan, PlanarU8, Window};
 use crate::simd::Chunk;
-use crate::solver::cell::{BandView, paint_background, paint_cell};
+use crate::solver::cell::{BandView, STRIP_PITCH, paint_background, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
 use crate::solver::{Solution, Workspace, write_jsonl};
 
 /// Channels the pipeline works in (RGB; the decoder normalises to this).
 const CHANNELS: usize = 3;
+
+// ---------------------------------------------------------------- work items
+
+/// Where one column item's resampled pixels land in the wall canvas.
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    /// Left edge, in canvas pixels.
+    x: usize,
+    /// Top edge, in canvas pixels.
+    y: usize,
+    /// Width in pixels.
+    width: usize,
+    /// Height in pixels.
+    height: usize,
+}
+
+/// One unit of parallel work: one block column of the wall.
+///
+/// Carries only rects and indices — never a pixel payload. Everything else the
+/// closure needs is a shared borrow in [`ColContext`].
+#[derive(Clone, Debug)]
+struct ColItem {
+    /// Block (and banner) column index.
+    col: usize,
+    /// Source region this column reads, in fractional source pixels. Adjacent
+    /// columns overlap here by the horizontal kernel support — each band is
+    /// computed independently from the source, so the overlap is re-read, never
+    /// shared.
+    src_rect: Window,
+    /// Where this column's resampled pixels land in the canvas.
+    dest_rect: Rect,
+    /// Columns of the resample target this item covers.
+    target_cols: Range<usize>,
+    /// Canvas columns this item owns exclusively (its strip). Always exactly one
+    /// block wide: block columns tile the wall with nothing left over.
+    strip_cols: Range<usize>,
+}
+
+/// Everything a column item borrows.
+struct ColContext<'a> {
+    source: &'a PlanarU8,
+    plan: &'a Plan,
+    layout: &'a Layout,
+    patterns: &'a Patterns,
+    /// Per-cell layer budget from the variance pre-pass.
+    layers: &'a LayerGrid,
+    /// Largest budget in the grid — the size every workspace is built for.
+    max_layers: usize,
+}
+
+/// What one column item produces.
+struct ColOutcome {
+    /// One entry per cell of the column, top to bottom.
+    cells: Vec<Solution>,
+    /// The column's rendered preview strip: `wall_height` rows of
+    /// [`STRIP_PITCH`] bytes, interleaved into the canvas after the `par_iter`.
+    strip: Vec<u8>,
+    /// CPU time this item spent resampling.
+    resample: Duration,
+    /// CPU time this item spent solving and painting cells.
+    solve: Duration,
+}
+
+/// Split the wall into one item per block column.
+fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
+    let (ox, oy) = layout.origin;
+    (0..layout.columns)
+        .map(|col| {
+            let strip_cols = col * BLOCK_SIDE..(col + 1) * BLOCK_SIDE;
+            // The part of this strip the resampled image covers: under --fill
+            // the image is narrower than the wall, so a strip can hold fewer
+            // target columns than it has canvas columns (or none at all).
+            let lo = strip_cols.start.clamp(ox, ox + layout.target_width);
+            let hi = strip_cols.end.clamp(ox, ox + layout.target_width);
+            let target_cols = (lo - ox)..(hi - ox);
+            let (x0, x1) = plan.src_cols(&target_cols);
+            ColItem {
+                col,
+                src_rect: Window {
+                    x0,
+                    y0: layout.window.y0,
+                    x1,
+                    y1: layout.window.y1,
+                },
+                dest_rect: Rect {
+                    x: lo,
+                    y: oy,
+                    width: target_cols.len(),
+                    height: layout.target_height,
+                },
+                target_cols,
+                strip_cols,
+            }
+        })
+        .collect()
+}
+
+/// Produce one block column of the wall.
+///
+/// Shared borrows arrive through `ctx`; the strip the item paints is its own
+/// local buffer (`wall_height × 24 × 3` bytes, part of the item's bounded
+/// memory), interleaved into the canvas by the driver afterwards. Why local
+/// rather than a slice of the canvas: the canvas is row-major, so a column of it
+/// is not a contiguous `&mut [u8]` and `split_at_mut` cannot hand one out.
+/// Painting locally and interleaving once keeps the whole pipeline in safe code,
+/// and the copy lands in a buffer that has to exist for the PNG encode anyway.
+fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
+    debug_assert_eq!(
+        item.strip_cols.len(),
+        BLOCK_SIDE,
+        "one item, one block column"
+    );
+    let mut strip = vec![0u8; ctx.layout.wall_height * STRIP_PITCH];
+    paint_background(&mut strip);
+
+    // The column's own band, resampled locally out of the source region
+    // `item.src_rect` and dropped at the end of this call. It is absent only
+    // when `--fill` leaves this column entirely padding.
+    let t = Instant::now();
+    let band = (!item.target_cols.is_empty()).then(|| {
+        ctx.plan
+            .band((item.src_rect.x0, item.src_rect.x1), item.dest_rect.width)
+            .resample(ctx.source)
+    });
+    let resample = t.elapsed();
+    debug_assert!(band.as_ref().is_none_or(|b| b.channels() == CHANNELS));
+    debug_assert!(
+        band.as_ref()
+            .is_none_or(|b| b.height == item.dest_rect.height)
+    );
+
+    let view = BandView::new(
+        band.as_ref(),
+        item.dest_rect.x,
+        item.dest_rect.y,
+        ctx.layout.pad.unwrap_or([0; CHANNELS]),
+    );
+
+    // Cells top to bottom. Banner row 0 has nothing hanging in front of it, so
+    // it solves the full 20x40 patch; every other row solves only its visible 24
+    // rows. Same code, two monomorphisations — hence two workspaces, each reused
+    // down the column.
+    let t = Instant::now();
+    let mut cells = Vec::with_capacity(ctx.layout.rows);
+    let mut top = Workspace::<TOP_HW>::new(ctx.max_layers);
+    let mut lower = Workspace::<NTOP_HW>::new(ctx.max_layers);
+    for row in 0..ctx.layout.rows {
+        cells.push(if row == 0 {
+            solve_cell(
+                ctx,
+                &mut top,
+                &view,
+                &mut strip,
+                (row, item.col),
+                &ctx.patterns.top,
+                &ctx.patterns.top_alpha2,
+            )
+        } else {
+            solve_cell(
+                ctx,
+                &mut lower,
+                &view,
+                &mut strip,
+                (row, item.col),
+                &ctx.patterns.lower,
+                &ctx.patterns.lower_alpha2,
+            )
+        });
+    }
+    let solve = t.elapsed();
+
+    ColOutcome {
+        cells,
+        strip,
+        resample,
+        solve,
+    }
+}
+
+/// Solve cell `(row, col)` and paint it into the column strip.
+fn solve_cell<const HW: usize>(
+    ctx: &ColContext<'_>,
+    workspace: &mut Workspace<HW>,
+    view: &BandView<'_>,
+    strip: &mut [u8],
+    (row, col): (usize, usize),
+    alphas: &[Chunk<HW>],
+    alpha2: &[f32],
+) -> Solution {
+    view.gather::<HW>(row, col, workspace.target_mut());
+    let solution = workspace.solve(ctx.layers.get(row, col), alphas, alpha2);
+    paint_cell::<HW>(strip, row, workspace.composite());
+    solution
+}
+
+/// Copy every column strip into the wall canvas.
+///
+/// Parallel over canvas rows: each canvas row is written once, left to right,
+/// gathering one 24-pixel run from each strip. This is the only wall-sized copy
+/// in the pipeline, and it is acceptable only because the canvas has to exist
+/// for the PNG encode regardless — nothing else wall-sized is materialised.
+///
+/// Kept as a standalone step on purpose: the full-resolution canvas is an
+/// intermediate consumer, and the HTML export will want a *downscaled* preview
+/// (through this crate's own resampler). That stage slots in right after this
+/// one, taking the assembled canvas as its input.
+fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
+    canvas
+        .par_chunks_mut(wall_width * CHANNELS)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (c, outcome) in outcomes.iter().enumerate() {
+                let dst = c * STRIP_PITCH;
+                let src = y * STRIP_PITCH;
+                row[dst..dst + STRIP_PITCH].copy_from_slice(&outcome.strip[src..src + STRIP_PITCH]);
+            }
+        });
+}
+
+// -------------------------------------------------------------------- driver
 
 /// Parse arguments, validate, and run the pipeline.
 pub fn run_cli() {
@@ -59,204 +286,7 @@ pub fn run_cli() {
     run(&config);
 }
 
-// ---------------------------------------------------------------- work items
-
-/// Where one row item's resampled pixels land in the wall canvas.
-#[derive(Clone, Copy, Debug)]
-struct Rect {
-    /// Left edge, in canvas pixels.
-    x: usize,
-    /// Top edge, in canvas pixels.
-    y: usize,
-    /// Width in pixels.
-    width: usize,
-    /// Height in pixels.
-    height: usize,
-}
-
-/// One unit of parallel work: one banner row of the wall.
-///
-/// Carries only rects and indices — never a pixel payload. Everything else the
-/// closure needs is a shared borrow in [`RowContext`].
-#[derive(Clone, Debug)]
-struct RowItem {
-    /// Banner row index.
-    row: usize,
-    /// Source region this row reads, in fractional source pixels. Adjacent rows
-    /// overlap here by the vertical kernel support — each row band is computed
-    /// independently from the source, so the overlap is re-read, never shared.
-    src_rect: Window,
-    /// Where this row's resampled pixels land in the canvas.
-    dest_rect: Rect,
-    /// Rows of the resample target this item covers.
-    target_rows: Range<usize>,
-    /// Canvas rows this item owns exclusively (its strip). Equal to the
-    /// `dest_rect` rows except under `--fill`, where the strip also holds the
-    /// padding above and below the image.
-    strip_rows: Range<usize>,
-}
-
-/// Everything a row item borrows.
-struct RowContext<'a> {
-    source: &'a PlanarU8,
-    plan: &'a Plan,
-    layout: &'a Layout,
-    patterns: &'a Patterns,
-    /// Per-cell layer budget from the variance pre-pass.
-    layers: &'a LayerGrid,
-    /// Largest budget in the grid — the size every workspace is built for.
-    max_layers: usize,
-}
-
-/// What one row item produces.
-struct RowOutcome {
-    /// One entry per cell of the row, left to right.
-    cells: Vec<Solution>,
-    /// CPU time this item spent resampling.
-    resample: Duration,
-    /// CPU time this item spent solving and painting cells.
-    solve: Duration,
-}
-
-/// Split the wall into one item per banner row.
-fn row_items(layout: &Layout, plan: &Plan) -> Vec<RowItem> {
-    let (ox, oy) = layout.origin;
-    (0..layout.rows)
-        .map(|row| {
-            let strip_rows = banner_row_span(row, layout.rows);
-            // The part of this strip the resampled image covers: under --fill
-            // the image is smaller than the wall, so a strip can hold fewer
-            // target rows than it has canvas rows (or none at all).
-            let lo = strip_rows.start.clamp(oy, oy + layout.target_height);
-            let hi = strip_rows.end.clamp(oy, oy + layout.target_height);
-            let target_rows = (lo - oy)..(hi - oy);
-            let (y0, y1) = plan.src_rows(&target_rows);
-            RowItem {
-                row,
-                src_rect: Window {
-                    x0: layout.window.x0,
-                    y0,
-                    x1: layout.window.x1,
-                    y1,
-                },
-                dest_rect: Rect {
-                    x: ox,
-                    y: lo,
-                    width: layout.target_width,
-                    height: target_rows.len(),
-                },
-                target_rows,
-                strip_rows,
-            }
-        })
-        .collect()
-}
-
-/// Produce one banner row of the wall.
-///
-/// Shared borrows arrive through `ctx`; `strip` is this item's exclusive slice
-/// of the wall canvas — exactly `item.strip_rows` full canvas rows of
-/// interleaved RGB `u8`, so no two items ever touch the same byte. Which rows a
-/// strip paints, and why that needs no coordination between items despite
-/// banners overlapping, is [`crate::solver::cell`]'s module docs.
-fn render_row(ctx: &RowContext<'_>, item: &RowItem, strip: &mut [u8]) -> RowOutcome {
-    let wall_width = ctx.layout.wall_width;
-    debug_assert_eq!(
-        item.strip_rows,
-        banner_row_span(item.row, ctx.layout.rows),
-        "an item's strip is exactly its banner row's span"
-    );
-
-    paint_background(strip, wall_width, item.strip_rows.start);
-
-    // The row's own band, resampled locally out of the source region
-    // `item.src_rect` and dropped at the end of this call. It is absent only
-    // when `--fill` leaves this row entirely padding.
-    let t = Instant::now();
-    let band = (!item.target_rows.is_empty()).then(|| {
-        ctx.plan
-            .band((item.src_rect.y0, item.src_rect.y1), item.dest_rect.height)
-            .resample(ctx.source)
-    });
-    let resample = t.elapsed();
-    debug_assert!(band.as_ref().is_none_or(|b| b.channels() == CHANNELS));
-    debug_assert!(
-        band.as_ref()
-            .is_none_or(|b| b.width == item.dest_rect.width)
-    );
-
-    let view = BandView::new(
-        band.as_ref(),
-        item.dest_rect.x,
-        item.dest_rect.y,
-        ctx.layout.pad.unwrap_or([0; CHANNELS]),
-    );
-
-    // Banner row 0 has nothing hanging in front of it, so it solves the full
-    // 20x40 patch; every other row solves only its visible 24 rows. Same code,
-    // two monomorphisations.
-    let t = Instant::now();
-    let cells = if item.row == 0 {
-        solve_row::<TOP_HW>(
-            ctx,
-            item,
-            &view,
-            strip,
-            &ctx.patterns.top,
-            &ctx.patterns.top_alpha2,
-        )
-    } else {
-        solve_row::<NTOP_HW>(
-            ctx,
-            item,
-            &view,
-            strip,
-            &ctx.patterns.lower,
-            &ctx.patterns.lower_alpha2,
-        )
-    };
-    let solve = t.elapsed();
-
-    RowOutcome {
-        cells,
-        resample,
-        solve,
-    }
-}
-
-/// Solve and paint every cell of one banner row.
-///
-/// The workspace is built once per row and reused across its cells, so the only
-/// per-cell allocation is the solution's layer list.
-fn solve_row<const HW: usize>(
-    ctx: &RowContext<'_>,
-    item: &RowItem,
-    view: &BandView<'_>,
-    strip: &mut [u8],
-    alphas: &[Chunk<HW>],
-    alpha2: &[f32],
-) -> Vec<Solution> {
-    let mut workspace = Workspace::<HW>::new(ctx.max_layers);
-    (0..ctx.layout.columns)
-        .map(|col| {
-            view.gather::<HW>(item.row, col, workspace.target_mut());
-            let solution = workspace.solve(ctx.layers.get(item.row, col), alphas, alpha2);
-            paint_cell::<HW>(
-                strip,
-                ctx.layout.wall_width,
-                item.strip_rows.start,
-                item.row,
-                col,
-                workspace.composite(),
-            );
-            solution
-        })
-        .collect()
-}
-
-// -------------------------------------------------------------------- driver
-
-/// Decode, lay out, run the row items, write this phase's outputs.
+/// Decode, lay out, run the column items, write this stage's outputs.
 fn run(config: &Config) {
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
@@ -288,7 +318,7 @@ fn run(config: &Config) {
         layout.target_width,
         layout.target_height,
     );
-    let items = row_items(&layout, &plan);
+    let items = col_items(&layout, &plan);
     let patterns = pattern::load(&config.exclude_patterns);
     let t_plan = t.elapsed();
 
@@ -301,7 +331,7 @@ fn run(config: &Config) {
         crate::color::NUM_COLORS
     );
     info!(
-        "wall: {}x{} px, resampling {}x{} -> {}x{} in {} banner-row items",
+        "wall: {}x{} px, resampling {}x{} -> {}x{} in {} block-column items",
         layout.wall_width,
         layout.wall_height,
         src_w,
@@ -312,8 +342,8 @@ fn run(config: &Config) {
     );
 
     // ---- variance pre-pass -------------------------------------------------
-    // Runs on the source image, before the row items, because the layer budget
-    // is a global min/max normalisation across every cell of the wall.
+    // Runs on the source image, before the column items, because the layer
+    // budget is a global min/max normalisation across every cell of the wall.
     let t = Instant::now();
     let layers = layer_grid(&source, &layout, config.n_layers);
     let max_layers = layers.max();
@@ -332,14 +362,9 @@ fn run(config: &Config) {
             .join(" ")
     );
 
-    // ---- the pipeline: one flat par_iter over banner rows ------------------
-    // The canvas has to exist for the encode either way; it is split into
-    // per-item strips up front, so items write straight into it without locking
-    // and without a wall-sized f32 buffer anywhere.
+    // ---- the pipeline: one flat par_iter over block columns ----------------
     let t = Instant::now();
-    let mut canvas = vec![0u8; layout.wall_width * layout.wall_height * CHANNELS];
-    let strips = split_strips(&mut canvas, &items, layout.wall_width);
-    let ctx = RowContext {
+    let ctx = ColContext {
         source: &source,
         plan: &plan,
         layout: &layout,
@@ -347,12 +372,17 @@ fn run(config: &Config) {
         layers: &layers,
         max_layers,
     };
-    let outcomes: Vec<RowOutcome> = strips
-        .into_par_iter()
-        .zip(items.par_iter())
-        .map(|(strip, item)| render_row(&ctx, item, strip))
+    let outcomes: Vec<ColOutcome> = items
+        .par_iter()
+        .map(|item| render_column(&ctx, item))
         .collect();
     let t_pipeline = t.elapsed();
+
+    // ---- interleave the column strips into the canvas ----------------------
+    let t = Instant::now();
+    let mut canvas = vec![0u8; layout.wall_width * layout.wall_height * CHANNELS];
+    interleave(&mut canvas, &outcomes, layout.wall_width);
+    let t_interleave = t.elapsed();
 
     // Reduce the per-item stats now, so the outcomes can be consumed for the
     // JSONL without copying every cell's layer list.
@@ -409,10 +439,15 @@ fn run(config: &Config) {
         );
         debug_line("  resample (cpu)", cpu_resample, None);
         debug_line("  solve (cpu)", cpu_solve, None);
+        debug_line(
+            "interleave",
+            t_interleave,
+            Some(format!("{} column strips -> canvas", layout.columns)),
+        );
         debug_line("encode", t_encode, None);
         debug_line(
             "total",
-            t_decode + t_plan + t_variance + t_pipeline + t_encode,
+            t_decode + t_plan + t_variance + t_pipeline + t_interleave + t_encode,
             None,
         );
         println!(
@@ -432,25 +467,8 @@ fn run(config: &Config) {
 }
 
 /// `<OUTPUT>` with its extension replaced by `.jsonl`.
-fn jsonl_path(output: &Path) -> std::path::PathBuf {
+fn jsonl_path(output: &Path) -> PathBuf {
     output.with_extension("jsonl")
-}
-
-/// Hand each item its own exclusive slice of the canvas.
-fn split_strips<'a>(
-    canvas: &'a mut [u8],
-    items: &[RowItem],
-    wall_width: usize,
-) -> Vec<&'a mut [u8]> {
-    let mut rest = canvas;
-    let mut strips = Vec::with_capacity(items.len());
-    for item in items {
-        let (strip, tail) = rest.split_at_mut(item.strip_rows.len() * wall_width * CHANNELS);
-        strips.push(strip);
-        rest = tail;
-    }
-    debug_assert!(rest.is_empty(), "row items must tile the canvas exactly");
-    strips
 }
 
 /// One `debug: <stage> <time>` line.

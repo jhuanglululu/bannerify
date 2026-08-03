@@ -73,28 +73,6 @@ pub const fn wall_height(rows: usize) -> usize {
     (rows + 1) * BLOCK_SIDE
 }
 
-/// Target-pixel rows owned by banner row `row`, of `rows` banner rows.
-///
-/// This is the pipeline's work-item split (`context/designs/pipeline.md`): one
-/// item per banner row, and the spans tile the wall exactly.
-///
-/// A banner is [`BANNER_H`] pixels tall but only its bottom [`VISIBLE_H`] shows
-/// once the next row hangs over it, so row `r > 0` owns exactly the strip its
-/// visible part occupies, `offset_row(r) .. offset_row(r) + VISIBLE_H`. Row 0
-/// additionally owns everything above it (its own hidden top half plus the top
-/// block padding), and the last row owns the wall's bottom padding — so no
-/// pixel of the wall belongs to no item.
-pub fn banner_row_span(row: usize, rows: usize) -> core::ops::Range<usize> {
-    debug_assert!(row < rows, "banner row out of range");
-    let start = if row == 0 { 0 } else { offset_row(row) };
-    let end = if row + 1 == rows {
-        wall_height(rows)
-    } else {
-        offset_row(row + 1)
-    };
-    start..end
-}
-
 /// Pick the block count along one axis that least distorts the aspect ratio.
 ///
 /// `x`/`y` are the source dimensions along the axis being inferred and its
