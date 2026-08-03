@@ -7,6 +7,10 @@
 //!
 //! Options under "Generation" and "Refinement" are parsed and validated now but
 //! do nothing until the phase-2 solver lands; their help text says so.
+//!
+//! `--debug` is logging only: per-stage timings and memory, no file dumping.
+//! While the pipeline is partial the tool's normal output is the current step's
+//! intermediate, so there is nothing extra to dump.
 
 use std::path::PathBuf;
 
@@ -26,7 +30,8 @@ pub mod config;
 pub struct Args {
     /// Input image path
     pub input: PathBuf,
-    /// Output html path
+    /// Output path (an HTML export once the pipeline is complete; for now it
+    /// receives this phase's intermediate: the resized wall as a PNG)
     pub output: PathBuf,
 
     /// Height of output in blocks (number of banner rows + 1)
@@ -44,7 +49,7 @@ pub struct Args {
     #[arg(short, long, value_name = "NUMBER_OF_WORKERS")]
     pub workers: Option<usize>,
 
-    /// Print per-stage timings and dump the resized intermediate next to OUTPUT
+    /// Log per-stage wall timings and peak memory (no extra files are written)
     #[arg(long)]
     pub debug: bool,
 

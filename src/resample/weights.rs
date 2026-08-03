@@ -154,8 +154,6 @@ impl HWeights {
 /// No alignment shifting here — the V pass walks whole rows, which are aligned
 /// by construction, so the taps enter as splatted scalars and nothing is wasted.
 pub struct VWeights {
-    /// Number of output rows.
-    pub out_len: usize,
     /// Taps per output row (uniform).
     pub ksize: usize,
     /// First source row of each output row's window.
@@ -170,7 +168,6 @@ impl VWeights {
     pub fn new(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Self {
         let c = coeffs(in_size, in0, in1, out_size);
         Self {
-            out_len: out_size,
             ksize: c.ksize,
             starts: c.starts,
             weights: c.weights,
