@@ -29,25 +29,34 @@
 //!
 //! - `target` — the cell's pixels, planar ([`crate::solver::cell`] fills it).
 //! - `prefixes[i]` — the composite after `i` layers; `prefixes[0]` is the flat
-//!   base, `prefixes[depth]` is what the preview draws.
+//!   base, `prefixes[n_layers]` is the composite the solve is scored on.
 //! - `suffixes[i]` — the affine map "apply layers `i..` to a colour":
 //!   `x ↦ x·mul + add`, per channel. Built walking backwards, the mirror of the
 //!   prefixes ([`super::refine`]).
 //! - `beam` — the refinement window's candidate suffixes and layer lists.
-//! - `cand` — scratch composite for the OKLab pass, and `lab_target` the
-//!   target converted once per cell.
+//! - `rgb` — scratch for [`Workspace::render_rgb`], which replays the finished
+//!   solution in sRGB for the preview.
+//!
+//! ## Which space the planes are in
+//!
+//! Since phase 4 (`context/plans/4-oklab-native.md`) `target`, `prefixes` and
+//! `suffixes` all hold **OKLab** components: the column band is converted once,
+//! right after resampling, and every cell borrows Lab pixels out of it. Only
+//! `rgb` is sRGB, and only because painting is: the preview composites dye RGB
+//! over the pattern alphas exactly as the game does, so the picture is never an
+//! inverse transform of a Lab composite.
 
 use std::time::Duration;
 
 use crate::cli::config::RefinementConfig;
-use crate::color::W_PERCEPTUAL;
+use crate::color::{COLORS_F32, lab};
 use crate::geometry::{NTOP_HW, TOP_HW};
-use crate::pattern::Patterns;
+use crate::oklab::srgb_to_oklab;
 use crate::simd::{Chunk, F32s, LANES};
 use crate::zip;
 
 use super::perturb::Rng;
-use super::{greedy, lab, perturb, refine};
+use super::{greedy, perturb, refine};
 
 /// One patch plane: always the full top-row patch, whatever the row.
 pub type Plane = Chunk<TOP_HW>;
@@ -79,12 +88,13 @@ pub struct Solution {
     pub base: usize,
     /// `(pattern index, dye index)` per layer, in application order.
     pub layers: Vec<(usize, usize)>,
-    /// Weighted SSE of the final composite against the target patch, summed
-    /// over the solved pixels — not normalised.
+    /// OKLab SSE of the final composite against the target patch, summed over
+    /// the solved pixels — not normalised. This is the solver's objective.
     pub error: f32,
     /// Mean OKLab ΔE per pixel of the final composite, or `0.0` when it was not
-    /// asked for. Reported by `--debug`; never an optimisation target unless
-    /// `--lab-refine` is on.
+    /// asked for (`--debug`). The same quantity as [`Solution::error`] but per
+    /// pixel and un-squared, which is the number that reads as a colour
+    /// difference.
     pub lab_error: f32,
 }
 
@@ -166,8 +176,6 @@ pub struct Stages {
     pub refine: Duration,
     /// Perturbation rounds (including the re-refinement inside them).
     pub perturb: Duration,
-    /// OKLab final pass (and, under `--debug`, the ΔE readout).
-    pub oklab: Duration,
 }
 
 impl Stages {
@@ -176,21 +184,19 @@ impl Stages {
         self.greedy += other.greedy;
         self.refine += other.refine;
         self.perturb += other.perturb;
-        self.oklab += other.oklab;
     }
 }
 
 /// Everything a cell solve needs that is shared across the whole run.
 pub struct SolveCfg<'a> {
     /// The pattern tables.
-    pub patterns: &'a Patterns,
+    pub patterns: &'a crate::pattern::Patterns,
     /// Windowed-refinement settings; `refinement_pass == 0` disables it.
     pub refinement: &'a RefinementConfig,
     /// `(top_n, duplicates, rounds)`, or `None` when disabled.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Candidates the OKLab pass scores exactly, or `None` when disabled.
-    pub lab_refine: Option<usize>,
-    /// Report each cell's OKLab ΔE even when the OKLab pass is off (`--debug`).
+    /// Report each cell's mean OKLab ΔE (`--debug`). Off by default because it
+    /// is a per-pixel square root the solve itself has no use for.
     pub report_lab: bool,
 }
 
@@ -200,8 +206,6 @@ pub struct Workspace {
     pub(super) off: usize,
     /// Pixels the current cell solves.
     pub(super) hw: usize,
-    /// Layers in the last [`Workspace::solve`] — which prefix is the composite.
-    depth: usize,
     /// The cell's target pixels, planar, filled by the caller before `solve`.
     pub(super) target: [Plane; 3],
     /// Composite after `i` layers; `prefixes[0]` is the flat base colour.
@@ -210,15 +214,10 @@ pub struct Workspace {
     pub(super) suffixes: Vec<Suffix>,
     /// The refinement window's beam.
     pub(super) beam: Beam,
-    /// Scratch composite for the OKLab pass.
-    pub(super) cand: [Plane; 3],
-    /// The target converted to OKLab, once per cell.
-    pub(super) lab_target: [Plane; 3],
+    /// The solved cell replayed in sRGB, for the preview render.
+    rgb: [Plane; 3],
     /// Perturbation beam: `(error, solution)`, kept sorted ascending.
     pub(super) pool: Vec<(f32, Solution)>,
-    /// The OKLab pass's candidate shortlist: `(sRGB error, pattern, dye)` for
-    /// every `patterns x 16` pair of one layer.
-    pub(super) lab_cands: Vec<(f32, usize, usize)>,
     /// Trials a perturbation round is about to score.
     pub(super) trials: Vec<Solution>,
     /// Scratch layer list (the refinement's "did this pass change anything"
@@ -235,14 +234,11 @@ impl Workspace {
         Self {
             off: 0,
             hw: TOP_HW,
-            depth: 0,
             target: [Chunk::zeroed(); 3],
             prefixes: vec![[Chunk::zeroed(); 3]; max_layers + 1],
             suffixes: (0..max_layers + 1).map(|_| Suffix::new()).collect(),
             beam: Beam::new(candidates.max(1)),
-            cand: [Chunk::zeroed(); 3],
-            lab_target: [Chunk::zeroed(); 3],
-            lab_cands: Vec::new(),
+            rgb: [Chunk::zeroed(); 3],
             pool: Vec::new(),
             trials: Vec::new(),
             scratch: Vec::with_capacity(max_layers),
@@ -263,15 +259,75 @@ impl Workspace {
         &mut self.target
     }
 
-    /// The composite the last [`Workspace::solve`] produced — what the preview
-    /// draws. Only the active view holds this cell's pixels.
-    pub fn composite(&self) -> &[Plane; 3] {
-        &self.prefixes[self.depth]
+    /// Replay `solution` in sRGB and return the composite the preview draws,
+    /// recording its ΔE when [`SolveCfg::report_lab`] asks for it.
+    ///
+    /// The solver's own composite (`prefixes[n]`) is in OKLab, and inverting
+    /// that would be both extra work and *wrong*: OKLab compositing is the
+    /// solver's approximation on anti-aliased pattern edges, while the game
+    /// blends dye RGB over the mask. So the preview re-runs the chosen layer
+    /// chain in sRGB — one compositing pass per layer over one patch, a rounding
+    /// error next to the solve that produced it — and paints that.
+    ///
+    /// Only the active view holds this cell's pixels.
+    pub fn render_rgb(&mut self, solution: &mut Solution, cfg: &SolveCfg<'_>) -> &[Plane; 3] {
+        let off = self.off;
+        let patterns = cfg.patterns;
+        for (ch, plane) in self.rgb.iter_mut().enumerate() {
+            let c = F32s::splat(COLORS_F32[solution.base][ch]);
+            for out in zip!(mut view_mut(plane, off)) {
+                *out = c;
+            }
+        }
+        // In place: the composite reads and writes the same element, so the
+        // chain needs one buffer, not a ping-pong pair.
+        for &(p, c) in &solution.layers {
+            let alpha = &patterns.top[p];
+            for (ch, plane) in self.rgb.iter_mut().enumerate() {
+                let col = F32s::splat(COLORS_F32[c][ch]);
+                for (out, alp) in zip!(mut view_mut(plane, off), view(alpha, off)) {
+                    *out = (*out).mul_add(F32s::ONE - alp, col * alp);
+                }
+            }
+        }
+
+        if cfg.report_lab {
+            solution.lab_error = self.delta_e() / self.hw as f32;
+        }
+        &self.rgb
+    }
+
+    /// `Σ ΔE` between the sRGB composite [`Workspace::render_rgb`] just built
+    /// and the (OKLab) target.
+    ///
+    /// Deliberately scored on the *painted* pixels rather than on the solver's
+    /// own Lab prefix chain: the two differ on anti-aliased pattern edges, where
+    /// the solver blends linearly in Lab and the game blends dye RGB, and the
+    /// number worth reporting is the error of the wall a player will build. It
+    /// is also what makes this readout comparable with the pre-phase-4 builds,
+    /// which measured exactly the same thing.
+    fn delta_e(&self) -> f32 {
+        let off = self.off;
+        let mut acc = F32s::ZERO;
+        for (r, g, b, tl, ta, tb) in zip!(
+            view(&self.rgb[0], off),
+            view(&self.rgb[1], off),
+            view(&self.rgb[2], off),
+            view(&self.target[0], off),
+            view(&self.target[1], off),
+            view(&self.target[2], off)
+        ) {
+            let (l, a, b) = srgb_to_oklab(r, g, b);
+            let (dl, da, db) = (l - tl, a - ta, b - tb);
+            acc += dl.mul_add(dl, da.mul_add(da, db * db)).sqrt();
+        }
+        acc.hsum()
     }
 
     /// Solve the patch currently in [`Workspace::target_mut`]: greedy fill,
-    /// windowed refinement, perturbation rounds, OKLab pass — each stage
-    /// skipped when its configuration disables it.
+    /// windowed refinement, perturbation rounds — each stage skipped when its
+    /// configuration disables it. The patch is in OKLab and so is every number
+    /// the stages produce.
     ///
     /// `rng` is the column's stream; it is advanced only by the perturbation
     /// stage, so a run without `--perturbations` never touches it and the seed
@@ -281,8 +337,6 @@ impl Workspace {
             n_layers < self.prefixes.len(),
             "workspace built for fewer layers than requested"
         );
-        self.depth = n_layers;
-
         let alphas = &cfg.patterns.top;
         let alpha2 = if self.off == 0 {
             &cfg.patterns.top_alpha2
@@ -322,12 +376,6 @@ impl Workspace {
             self.stages.perturb += t.elapsed();
         }
 
-        if cfg.lab_refine.is_some() || cfg.report_lab {
-            let t = std::time::Instant::now();
-            lab::pass(self, &mut solution, cfg.lab_refine, alphas, n_layers);
-            self.stages.oklab += t.elapsed();
-        }
-
         solution
     }
 }
@@ -345,8 +393,9 @@ pub(super) fn rebuild_prefixes(
     alphas: &[Plane],
     n: usize,
 ) {
+    let lab = lab();
     for (ch, plane) in prefixes[0].iter_mut().enumerate() {
-        let base = F32s::splat(crate::color::COLORS_F32[solution.base][ch]);
+        let base = F32s::splat(lab.color[solution.base][ch]);
         for out in zip!(mut view_mut(plane, off)) {
             *out = base;
         }
@@ -354,12 +403,13 @@ pub(super) fn rebuild_prefixes(
     for layer in 0..n {
         let (done, rest) = prefixes.split_at_mut(layer + 1);
         let (p, c) = solution.layers[layer];
-        greedy::build_prefix(&done[layer], &mut rest[0], &alphas[p], c, off);
+        greedy::build_prefix(&done[layer], &mut rest[0], &alphas[p], lab.color[c], off);
     }
 }
 
-/// Weighted SSE of `prefix` against `target` — the number [`Solution::error`]
-/// carries.
+/// OKLab SSE of `prefix` against `target` — the number [`Solution::error`]
+/// carries. No channel weights: OKLab is uniform, which is the whole point of
+/// solving in it.
 pub(super) fn total_error(prefix: &[Plane; 3], target: &[Plane; 3], off: usize) -> f32 {
     let mut err = 0.0;
     for ch in 0..3 {
@@ -368,7 +418,7 @@ pub(super) fn total_error(prefix: &[Plane; 3], target: &[Plane; 3], off: usize) 
             let d = p - t;
             acc = d.mul_add(d, acc);
         }
-        err += W_PERCEPTUAL[ch] * acc.hsum();
+        err += acc.hsum();
     }
     err
 }

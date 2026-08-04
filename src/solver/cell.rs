@@ -37,6 +37,7 @@ use crate::geometry::{
     BANNER_H, BANNER_W, BLOCK_PIXELS, BLOCK_SIDE, HIDDEN_H, NTOP_HW, PAD_SIDE, PAD_TOP, TOP_HW,
     VISIBLE_H, offset_column, offset_row,
 };
+use crate::oklab::srgb_to_oklab_one;
 use crate::resample::ColBand;
 use crate::solver::workspace::Plane;
 
@@ -63,10 +64,14 @@ pub fn patch_rows(row: usize) -> (usize, usize, usize) {
 
 /// A column band, addressed in wall-canvas coordinates.
 ///
+/// The band is in **OKLab**: [`crate::app`] converts it in place once, right
+/// after resampling, so both this gather and the block matcher's read the space
+/// they score in without converting anything themselves.
+///
 /// Under `--fill` a column strip can extend past the resampled region — or miss
-/// it entirely; those pixels read as `fallback` (the pad colour) so a cell that
-/// straddles the edge still solves against something sensible instead of reading
-/// out of bounds.
+/// it entirely; those pixels read as `fallback` (the pad colour, converted the
+/// same way) so a cell that straddles the edge still solves against something
+/// sensible instead of reading out of bounds.
 pub struct BandView<'a> {
     /// `None` when the resampled region misses this column entirely.
     band: Option<&'a ColBand>,
@@ -74,23 +79,26 @@ pub struct BandView<'a> {
     x: usize,
     /// Wall row of the band's row 0.
     y: usize,
-    /// Value for wall pixels the band does not cover.
+    /// Value for wall pixels the band does not cover, in OKLab.
     fallback: [f32; CHANNELS],
 }
 
 impl<'a> BandView<'a> {
     /// Wrap `band`, whose top-left sample is wall pixel `(x, y)`.
+    ///
+    /// `fallback` is the `--fill` pad colour as sRGB bytes; it is converted here
+    /// so that every value this view hands out is in the band's space.
     pub fn new(band: Option<&'a ColBand>, x: usize, y: usize, fallback: [u8; CHANNELS]) -> Self {
         debug_assert!(band.is_none_or(|b| b.channels() == CHANNELS));
         Self {
             band,
             x,
             y,
-            fallback: [
+            fallback: srgb_to_oklab_one([
                 f32::from(fallback[0]),
                 f32::from(fallback[1]),
                 f32::from(fallback[2]),
-            ],
+            ]),
         }
     }
 
@@ -160,9 +168,10 @@ const _: () = assert!(BLOCK_PIXELS == BLOCK_SIDE * BLOCK_SIDE);
 
 /// Paint one solved cell's composite into its column strip.
 ///
-/// `composite` is the solver's final prefix, in the same patch layout as the
-/// target. Values can sit slightly outside `0..255` (nothing in the compositing
-/// algebra clamps, and lanczos overshoot rides in through the target), so the
+/// `composite` is the solution replayed in **sRGB**
+/// ([`crate::solver::Workspace::render_rgb`]) — the solver's own prefix chain is
+/// OKLab and is never painted. Same patch layout as the target. Values can sit
+/// slightly outside `0..255` (nothing in the compositing algebra clamps), so the
 /// clamp happens here, at the byte edge.
 pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
     let (y0, rows, base) = patch_rows(row);

@@ -38,9 +38,10 @@ use crate::geometry::BLOCK_SIDE;
 use crate::layout::Layout;
 use crate::logger::{error_out, info};
 use crate::memory;
+use crate::oklab::planes_to_oklab;
 use crate::pattern;
 use crate::preview;
-use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
+use crate::resample::{ColBand, InterleavedU8, Plan, PlanarU8, Window};
 use crate::solver::block::{BlockScratch, match_cell};
 use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
@@ -117,6 +118,8 @@ struct ColOutcome {
     strip: Vec<u8>,
     /// CPU time this item spent resampling.
     resample: Duration,
+    /// CPU time this item spent converting its band to OKLab.
+    convert: Duration,
     /// CPU time this item spent matching and painting background blocks.
     blocks_cpu: Duration,
     /// CPU time this item spent solving and painting banner cells.
@@ -197,6 +200,19 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
             .is_none_or(|b| b.height == item.dest_rect.height)
     );
 
+    // sRGB -> OKLab, once, in place. Everything downstream of here that scores
+    // colour — the banner solver and the block matcher both — works in OKLab
+    // (`context/plans/4-oklab-native.md`), so this is the pipeline's only
+    // conversion of target pixels: one LUT + cbrt pass over the band, not one
+    // per cell and certainly not one per scored candidate.
+    let t = Instant::now();
+    let mut band = band;
+    if let Some(band) = band.as_mut() {
+        band_to_oklab(band);
+    }
+    let band = band;
+    let convert = t.elapsed();
+
     let view = BandView::new(
         band.as_ref(),
         item.dest_rect.x,
@@ -232,8 +248,14 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
     for row in 0..ctx.layout.rows {
         workspace.begin(row);
         view.gather(row, item.col, workspace.target_mut());
-        let solution = workspace.solve(ctx.layers.get(row, item.col), &ctx.solve, &mut rng);
-        paint_cell(&mut strip, row, workspace.composite());
+        let mut solution = workspace.solve(ctx.layers.get(row, item.col), &ctx.solve, &mut rng);
+        // The solver's composite is OKLab; the wall is bytes. Replay the chosen
+        // layers in sRGB — the blend the game performs — and paint that.
+        paint_cell(
+            &mut strip,
+            row,
+            workspace.render_rgb(&mut solution, &ctx.solve),
+        );
         cells.push(solution);
     }
     let solve = t.elapsed();
@@ -243,10 +265,24 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         blocks,
         strip,
         resample,
+        convert,
         blocks_cpu,
         solve,
         stages: workspace.stages,
     }
+}
+
+/// Convert one resampled column band from sRGB to OKLab, in place.
+///
+/// The band's three planes are `(R, G, B)` going in and `(L, a, b)` coming out;
+/// the padding at the end of each row rides along, which costs nothing and is
+/// never read ([`ColBand::lanes_mut`]).
+fn band_to_oklab(band: &mut ColBand) {
+    let mut planes = band.lanes_mut();
+    let (Some(r), Some(g), Some(b)) = (planes.next(), planes.next(), planes.next()) else {
+        unreachable!("the pipeline's bands always carry {CHANNELS} channels");
+    };
+    planes_to_oklab([r, g, b]);
 }
 
 /// Copy every column strip into the wall canvas.
@@ -443,7 +479,6 @@ fn run(config: &Config) {
             patterns: &patterns,
             refinement: &config.refinement,
             perturbations: config.perturbations,
-            lab_refine: config.lab_refine,
             report_lab: config.debug,
         },
         seed: config.seed,
@@ -462,9 +497,14 @@ fn run(config: &Config) {
 
     // Reduce the per-item stats now, so the outcomes can be consumed without
     // copying every cell's layer list.
-    let (cpu_resample, cpu_blocks, cpu_solve) = outcomes.iter().fold(
-        (Duration::ZERO, Duration::ZERO, Duration::ZERO),
-        |(r, b, s), o| (r + o.resample, b + o.blocks_cpu, s + o.solve),
+    let (cpu_resample, cpu_convert, cpu_blocks, cpu_solve) = outcomes.iter().fold(
+        (
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        ),
+        |(r, c, b, s), o| (r + o.resample, c + o.convert, b + o.blocks_cpu, s + o.solve),
     );
     let mut stages = Stages::default();
     for outcome in &outcomes {
@@ -602,6 +642,11 @@ fn run(config: &Config) {
         );
         debug_line("  resample (cpu)", cpu_resample, None);
         debug_line(
+            "  oklab (cpu)",
+            cpu_convert,
+            Some(format!("{} column bands -> OKLab", layout.columns)),
+        );
+        debug_line(
             "  blocks (cpu)",
             cpu_blocks,
             Some(format!(
@@ -614,7 +659,6 @@ fn run(config: &Config) {
         debug_line("    greedy (cpu)", stages.greedy, None);
         debug_line("    refine (cpu)", stages.refine, None);
         debug_line("    perturb (cpu)", stages.perturb, None);
-        debug_line("    oklab (cpu)", stages.oklab, None);
         debug_line(
             "interleave",
             t_interleave,
@@ -649,7 +693,7 @@ fn run(config: &Config) {
         debug_line("html", t_html, Some(memory::format_bytes(page.len())));
         debug_line("total", started.elapsed(), None);
         println!(
-            "{}: {:<16} {:.1} weighted SSE per cell, {:.4} mean OKLab dE per pixel",
+            "{}: {:<16} {:.4} OKLab SSE per cell, {:.5} mean OKLab dE per pixel",
             "debug".blue().bold(),
             "error",
             mean_err,

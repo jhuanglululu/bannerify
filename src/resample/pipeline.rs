@@ -373,6 +373,24 @@ impl ColBand {
         let start = y * self.stride;
         &self.planes[channel][start..start + self.width]
     }
+
+    /// Every channel plane whole, as a mutable lane view.
+    ///
+    /// The one mutation a band exposes, and it exists for exactly one caller:
+    /// the pipeline converts the band in place from sRGB to OKLab immediately
+    /// after resampling ([`crate::app`]), so the banner solver and the block
+    /// matcher both read the perceptual space out of the buffer the resampler
+    /// filled — one pass over the band instead of one per cell or per candidate
+    /// (`context/plans/4-oklab-native.md`).
+    ///
+    /// The view covers the row padding as well as the `width` valid samples.
+    /// That is deliberate: the padding is zeroed, whole lanes are cheaper than a
+    /// remainder path, and nothing ever reads it — [`ColBand::row`] stops at
+    /// `width`. A pointwise transform therefore does not need to know where the
+    /// rows are.
+    pub fn lanes_mut(&mut self) -> impl Iterator<Item = &mut [F32s]> {
+        self.planes.iter_mut().map(AlignedVec::lanes_mut)
+    }
 }
 
 /// Horizontal pass: one padded source row in, one band-wide output row out.

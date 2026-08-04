@@ -10,10 +10,16 @@
 //!
 //! 1. gather the block cell's exposed pixels out of the column's resampled band
 //!    — the frame's index list, [`crate::block`], picks them;
-//! 2. convert that gather to OKLab, with the same function that converted the
-//!    block textures at load;
-//! 3. score every block by Euclidean OKLab distance over those pixels and keep
+//! 2. score every block by Euclidean OKLab distance over those pixels and keep
 //!    the smallest.
+//!
+//! The gather used to convert to OKLab itself; since phase 4 the band already
+//! *is* OKLab (the banner solver works in it too, so the conversion happens once
+//! per column band instead of once per block cell — see
+//! `context/plans/4-oklab-native.md`), so the matcher's own conversion path is
+//! gone. Both sides of the distance still come from
+//! [`crate::oklab::planes_to_oklab`]: the block textures at load, the band right
+//! after resampling.
 //!
 //! No closed form and no shortlist: unlike the banner solver there is nothing
 //! to expand — a block is a fixed texture, not a colour laid through a mask, so
@@ -26,7 +32,6 @@
 
 use crate::block::{
     BOTTOM_FRAME, Blocks, FRAME_EDGE, FRAME_MID, Frame, FramePlanes, MIDDLE_FRAME, TOP_FRAME,
-    to_oklab,
 };
 use crate::geometry::BLOCK_SIDE;
 use crate::simd::{Chunk, F32s};
@@ -88,7 +93,7 @@ pub fn match_cell(
     }
 }
 
-/// Gather the frame's pixels of block cell `(row, col)` and convert to OKLab.
+/// Gather the frame's pixels of block cell `(row, col)` — already OKLab.
 fn gather<const N: usize>(
     view: &BandView<'_>,
     row: usize,
@@ -103,7 +108,6 @@ fn gather<const N: usize>(
             plane[i] = view.pixel(y0 + y, x0 + x, ch);
         }
     }
-    to_oklab(out);
 }
 
 /// The block whose frame is closest to `target` in OKLab.

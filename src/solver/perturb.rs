@@ -98,7 +98,7 @@ pub(super) fn rounds(
     }
 
     // The incumbent pool, best first. `solution.error` is the refined fit's
-    // weighted SSE; every trial is scored the same way.
+    // OKLab SSE; every trial is scored the same way.
     ws.pool.clear();
     ws.pool.push((solution.error, solution.clone()));
 

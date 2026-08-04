@@ -8,6 +8,10 @@
 //! Adapted from the old build: `toml::from_slice` no longer exists in the
 //! current `toml` crate, so the file is read as a string and parsed with
 //! `toml::from_str`.
+//!
+//! [`ConfigToml`] is `deny_unknown_fields`, so a key that no longer exists is an
+//! error rather than a silent no-op. That is deliberate for `lab_refine`,
+//! removed in phase 4: a config file still carrying it should say so.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -51,8 +55,6 @@ pub struct Config {
     pub refinement: RefinementConfig,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Candidates the OKLab pass scores exactly, or `None` when off.
-    pub lab_refine: Option<usize>,
     /// Perturbation RNG seed; irrelevant unless `perturbations` is set.
     pub seed: u64,
 }
@@ -85,7 +87,6 @@ pub struct ConfigToml {
     pub error_threshold: Option<f32>,
     pub refinement_candidate: Option<usize>,
     pub perturbations: Option<Vec<usize>>,
-    pub lab_refine: Option<usize>,
     pub seed: Option<u64>,
     pub preview: Option<usize>,
     pub render: Option<PathBuf>,
@@ -146,7 +147,6 @@ impl From<Args> for Config {
                 &args.perturbations,
                 config.perturbations,
             ),
-            lab_refine: args.lab_refine.or(config.lab_refine),
             seed: args.seed.or(config.seed).unwrap_or(0),
         }
     }

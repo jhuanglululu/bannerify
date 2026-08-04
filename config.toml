@@ -4,7 +4,7 @@
 # Every key here is optional, and any value given on the command line wins over
 # the value in this file.
 #
-# Every key below is live as of phase 3.
+# Every key below is live as of phase 4.
 
 # default is blank, put a number if you want to limit the workers
 # keeping it blank is the most performance option
@@ -52,8 +52,10 @@ layer_range = [4, 6]
 # any zero disables it
 # perturbations = [0, 0, 0]
 
-# number of candidates for the perceptual (OKLab) refinement pass
-# lab_refine = 5
+# 'lab_refine' was removed in 1.x: the solver's working space is now OKLab end
+# to end, so perceptual scoring is the objective rather than an extra pass with
+# a candidate budget. There is nothing to configure, and leaving the key in this
+# file is an error rather than a no-op.
 
 # * Refinement Options *
 

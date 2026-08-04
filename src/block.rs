@@ -49,10 +49,9 @@ use rust_embed::Embed;
 
 use crate::geometry::{BLOCK_PIXELS, BLOCK_SIDE, MIDDLE_OFFSET, PAD_BOTTOM, PAD_SIDE, PAD_TOP};
 use crate::logger::error_out;
-use crate::oklab::srgb_to_oklab;
+use crate::oklab::planes_to_oklab;
 use crate::resample::{Plan, PlanarU8};
 use crate::simd::Chunk;
-use crate::zip;
 
 /// Channels a block texture carries.
 const CHANNELS: usize = 3;
@@ -277,14 +276,15 @@ fn planes<const N: usize>(texture: &[u8; TEXTURE_BYTES], idx: &[u16; N]) -> Fram
 
 /// Convert three sRGB planes to OKLab in place.
 ///
-/// Shared with the matcher's target gather ([`crate::solver::block`]), which is
-/// the point: the two sides of the distance must be produced by exactly the
-/// same conversion.
+/// Used at load time only. The matcher's *target* side is no longer converted
+/// here: since phase 4 the column band arrives already in OKLab (the solver
+/// works in it too, so one conversion serves both — see
+/// `context/plans/4-oklab-native.md`), and the matcher gathers straight out of
+/// it. The two sides of the distance are still produced by exactly the same
+/// arithmetic, because this is [`crate::oklab::planes_to_oklab`] and so is the
+/// band's conversion.
 pub fn to_oklab<const N: usize>(planes: &mut FramePlanes<N>) {
     let (r, rest) = planes.split_at_mut(1);
     let (g, b) = rest.split_at_mut(1);
-    for (r, g, b) in zip!(mut r[0], mut g[0], mut b[0]) {
-        let (l, a, bb) = srgb_to_oklab(*r, *g, *b);
-        (*r, *g, *b) = (l, a, bb);
-    }
+    planes_to_oklab([r[0].lanes_mut(), g[0].lanes_mut(), b[0].lanes_mut()]);
 }

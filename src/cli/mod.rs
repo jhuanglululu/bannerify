@@ -6,7 +6,10 @@
 //! banner rows or columns and the pipeline does the rest.
 //!
 //! Every option is live as of phase 3 — `--exclude-blocks` was the last inert
-//! one and the background matcher now honours it.
+//! one and the background matcher now honours it. Phase 4 removed one:
+//! `-l/--lab-refine` chose how many candidates a final perceptual pass rescored
+//! in OKLab, and there is no such pass any more — the solver's whole objective
+//! is perceptual (`context/plans/4-oklab-native.md`).
 //!
 //! `--debug` is logging only: per-stage timings and memory, no file dumping.
 //! The pipeline is complete, so `<OUTPUT>` is the finished HTML export; the
@@ -109,12 +112,6 @@ pub struct Args {
     #[arg(help_heading = "Generation")]
     #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
-
-    /// Final perceptual (OKLab) pass, scoring the N best candidates per layer
-    /// exactly instead of by the closed-form RGB error [default: off]
-    #[arg(help_heading = "Generation")]
-    #[arg(short = 'l', long, value_name = "NUMBER_OF_CANDIDATES")]
-    pub lab_refine: Option<usize>,
 
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]

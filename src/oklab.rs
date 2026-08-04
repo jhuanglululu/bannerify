@@ -1,10 +1,22 @@
 //! sRGB → OKLab, on the [`simd`](crate::simd) facade.
 //!
-//! The solver's own error metric is a weighted SSE in sRGB, which is what makes
-//! its closed-form dye sweep possible ([`crate::color`]). That metric does not
-//! agree with the eye in the dark blues and greens a banner wall is full of, so
-//! the final pass ([`crate::solver::lab`]) rescores a shortlist of candidates by
-//! Euclidean distance in OKLab. This module is that conversion.
+//! OKLab is the space *everything that scores colour* works in: the banner
+//! solver ([`crate::solver`]), the background block matcher
+//! ([`crate::solver::block`]) and the dye tables ([`crate::color::lab`]). This
+//! module is the only conversion, and it is deliberately the only one — both
+//! sides of every distance must come from the same arithmetic.
+//!
+//! Phase 4 moved the solver here wholesale (`context/plans/4-oklab-native.md`).
+//! Before it, the solver minimised a weighted SSE in sRGB — that expression is
+//! quadratic in the dye colour, which is what makes the closed-form 16-dye
+//! sweep possible — and a separate opt-in pass rescored a shortlist in OKLab.
+//! The same closed form works directly on Lab components (compositing is
+//! linear, and on the 88% of pattern-mask pixels that are exactly 0/255 it
+//! commutes with this transform exactly), so the objective mismatch, the extra
+//! pass and its `--lab-refine` flag are all gone.
+//!
+//! The conversion runs **once per column band**, in place, right after
+//! resampling ([`crate::app`]) — not per cell and not per candidate.
 //!
 //! OKLab (Björn Ottosson, 2020) replaces the Python build's CIELAB + CIEDE2000:
 //! plain Euclidean distance in OKLab is already about as good a perceptual
@@ -31,11 +43,12 @@
 //!   `x²·(A·x + B)`, up to 5.3e-3 absolute error in linear light), this table is
 //!   built by Newton iteration in `const` context and is exact to f32.
 //! - **Cube root** is `f32::cbrt` per lane, i.e. correctly rounded libm rather
-//!   than a vector Newton iteration off a bit-hack seed. Two reasons: this pass
-//!   is off by default, and the LUT already forces a lane round-trip in the
-//!   same function, so the vector version would have to pay the same
-//!   store/load. The bonus is that the NEON and scalar backends produce
-//!   *bit-identical* OKLab values.
+//!   than a vector Newton iteration off a bit-hack seed: the LUT already forces
+//!   a lane round-trip in the same function, so the vector version would have to
+//!   pay the same store/load. The bonus is that the NEON and scalar backends
+//!   produce *bit-identical* OKLab values. Since phase 4 this runs once per band
+//!   sample instead of once per scored candidate, so its cost is a rounding
+//!   error in the profile either way.
 //!
 //! Everything between them — both matrices — is `F32s` arithmetic. There is no
 //! data-dependent branch left in the vector part (the sRGB piecewise lives in
@@ -122,6 +135,36 @@ pub fn srgb_to_oklab(r: F32s, g: F32s, b: F32s) -> (F32s, F32s, F32s) {
         matrix_row(M2[1], l, m, s),
         matrix_row(M2[2], l, m, s),
     )
+}
+
+/// One sRGB triple → OKLab, scalar.
+///
+/// The lane version with a width of one, so a value converted here is
+/// bit-identical to the same value converted inside a band: it goes through the
+/// very same [`srgb_to_oklab`]. Used for the things there is exactly one of —
+/// the 16 dye colours ([`crate::color::lab`]) and a `--fill` pad colour.
+#[inline]
+pub fn srgb_to_oklab_one(rgb: [f32; 3]) -> [f32; 3] {
+    let (l, a, b) = srgb_to_oklab(
+        F32s::splat(rgb[0]),
+        F32s::splat(rgb[1]),
+        F32s::splat(rgb[2]),
+    );
+    [l.to_array()[0], a.to_array()[0], b.to_array()[0]]
+}
+
+/// Convert three planar sRGB lane views to OKLab, in place.
+///
+/// The planes are `(R, G, B)` going in and `(L, a, b)` coming out — the shape
+/// both the column band ([`crate::app`]) and the block matcher's frame gathers
+/// ([`crate::block::to_oklab`]) are stored in.
+#[inline]
+pub fn planes_to_oklab([r, g, b]: [&mut [F32s]; 3]) {
+    debug_assert!(r.len() == g.len() && g.len() == b.len());
+    for ((r, g), b) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
+        let (l, a, bb) = srgb_to_oklab(*r, *g, *b);
+        (*r, *g, *b) = (l, a, bb);
+    }
 }
 
 /// One row of a 3×3 colour matrix applied to a lane triple.

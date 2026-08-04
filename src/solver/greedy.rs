@@ -1,5 +1,5 @@
 //! Greedy fill: pick a base dye, then one (pattern, dye) layer at a time,
-//! each time the pair that minimises the weighted SSE against the target patch.
+//! each time the pair that minimises the OKLab SSE against the target patch.
 //!
 //! Ported from `../bannerify-old/src/solver/fill.rs` (and its `build_prefix`)
 //! onto the [`simd`](crate::simd) facade. The algebra is unchanged — see
@@ -25,10 +25,15 @@
 //!    lane views with a runtime length rather than a `const HW` (see
 //!    [`super::workspace`]).
 //! 3. **The final error is reported.** The dye sweep's minimum at the last
-//!    layer already *is* the composite's weighted SSE, so it costs nothing to
-//!    keep — the old build recomputed error elsewhere.
+//!    layer already *is* the composite's SSE, so it costs nothing to keep — the
+//!    old build recomputed error elsewhere.
+//! 4. **Everything here is OKLab.** `target` holds Lab components, the dye
+//!    table is [`crate::color::lab`], and the channel weights are gone (phase 4;
+//!    `context/plans/4-oklab-native.md`). The algebra above is untouched: it
+//!    only needs compositing to be linear in the working space, and
+//!    linear-in-Lab compositing is what the solver does.
 
-use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::color::{NUM_COLORS, lab};
 use crate::simd::F32s;
 use crate::zip;
 
@@ -51,10 +56,12 @@ pub(super) fn fill(
 ) -> Solution {
     debug_assert_eq!(alphas.len(), alpha2.len());
 
+    let lab = lab();
+
     let (base, base_err) = best_base(target, off, hw);
-    for ch in 0..3 {
-        let c = F32s::splat(COLORS_F32[base][ch]);
-        for out in zip!(mut view_mut(&mut prefixes[0][ch], off)) {
+    for (ch, plane) in prefixes[0].iter_mut().enumerate() {
+        let c = F32s::splat(lab.color[base][ch]);
+        for out in zip!(mut view_mut(plane, off)) {
             *out = c;
         }
     }
@@ -91,11 +98,11 @@ pub(super) fn fill(
 
             // ...and the closed form scores all 16 dyes from those six.
             for c in 0..NUM_COLORS {
-                let color = COLORS_F32[c];
-                let err = W_PERCEPTUAL[0] * (res2[0] + res_2a[0] * color[0])
-                    + W_PERCEPTUAL[1] * (res2[1] + res_2a[1] * color[1])
-                    + W_PERCEPTUAL[2] * (res2[2] + res_2a[2] * color[2])
-                    + alpha2[p] * COLORS_WSQ_SUM[c];
+                let color = lab.color[c];
+                let err = (res2[0] + res_2a[0] * color[0])
+                    + (res2[1] + res_2a[1] * color[1])
+                    + (res2[2] + res_2a[2] * color[2])
+                    + alpha2[p] * lab.sq_sum[c];
                 if err < min_err {
                     best = (p, c);
                     min_err = err;
@@ -110,7 +117,13 @@ pub(super) fn fill(
         // runs for the last layer, because `prefixes[n_layers]` is the image
         // every later stage scores and the preview render draws.
         let (done, rest) = prefixes.split_at_mut(layer + 1);
-        build_prefix(&done[layer], &mut rest[0], &alphas[best.0], best.1, off);
+        build_prefix(
+            &done[layer],
+            &mut rest[0],
+            &alphas[best.0],
+            lab.color[best.1],
+            off,
+        );
     }
 
     Solution {
@@ -121,11 +134,11 @@ pub(super) fn fill(
     }
 }
 
-/// The base dye minimising `Σ w·(c − t)²`, and that minimum.
+/// The base dye minimising `Σ (c − t)²`, and that minimum.
 ///
-/// Expanding gives `Σ w·t² + c·(−2·Σ w·t) + HW·Σ w·c²`, so one pass over the
-/// patch reduces `Σ t²` and `−2·Σ t` per channel and the 16 dyes are scored
-/// from those — the same shape as the layer sweep, with `α ≡ 1`.
+/// Expanding gives `Σ t² + c·(−2·Σ t) + HW·Σ c²`, so one pass over the patch
+/// reduces `Σ t²` and `−2·Σ t` per channel and the 16 dyes are scored from
+/// those — the same shape as the layer sweep, with `α ≡ 1`.
 fn best_base(target: &[Plane; 3], off: usize, hw: usize) -> (usize, f32) {
     let mut t2 = [0.0_f32; 3];
     let mut n2t = [0.0_f32; 3];
@@ -140,14 +153,15 @@ fn best_base(target: &[Plane; 3], off: usize, hw: usize) -> (usize, f32) {
         n2t[ch] = -2.0 * acc.hsum();
     }
 
+    let lab = lab();
     let mut base = 0;
     let mut min_err = f32::INFINITY;
     for c in 0..NUM_COLORS {
-        let color = COLORS_F32[c];
-        let err = W_PERCEPTUAL[0] * (t2[0] + n2t[0] * color[0])
-            + W_PERCEPTUAL[1] * (t2[1] + n2t[1] * color[1])
-            + W_PERCEPTUAL[2] * (t2[2] + n2t[2] * color[2])
-            + hw as f32 * COLORS_WSQ_SUM[c];
+        let color = lab.color[c];
+        let err = (t2[0] + n2t[0] * color[0])
+            + (t2[1] + n2t[1] * color[1])
+            + (t2[2] + n2t[2] * color[2])
+            + hw as f32 * lab.sq_sum[c];
         if err < min_err {
             base = c;
             min_err = err;
@@ -158,15 +172,20 @@ fn best_base(target: &[Plane; 3], off: usize, hw: usize) -> (usize, f32) {
 
 /// `next = prefix · (1 − α) + color · α`, the one compositing step, ported from
 /// the old build's `build_prefix`.
+///
+/// `color` is a colour *triple*, not a dye index, because the same step runs in
+/// two spaces: the solver composites in OKLab, and the preview render
+/// ([`super::workspace::Workspace::render_rgb`]) replays the finished solution
+/// in sRGB to produce the bytes the game would show.
 pub(super) fn build_prefix(
     prefix: &[Plane; 3],
     next: &mut [Plane; 3],
     alpha: &Plane,
-    color: usize,
+    color: [f32; 3],
     off: usize,
 ) {
     for ch in 0..3 {
-        let c = F32s::splat(COLORS_F32[color][ch]);
+        let c = F32s::splat(color[ch]);
         for (out, pre, alp) in zip!(
             mut view_mut(&mut next[ch], off),
             view(&prefix[ch], off),

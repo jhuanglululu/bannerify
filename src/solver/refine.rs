@@ -57,9 +57,14 @@
 //!    prefix rebuild one layer short (it never needed `prefixes[n]`); here that
 //!    plane is the answer, so the chain is rebuilt in full and the reported
 //!    error is measured on it.
+//! 5. **The space is OKLab, not weighted sRGB** (phase 4). Every plane here —
+//!    target, prefix, and the suffix `mul`/`add` — carries Lab components, the
+//!    dye table is [`crate::color::lab`], and the channel weights are gone. The
+//!    kernels' shape is untouched: what changed is the constants and the
+//!    contents of the planes, not the algebra.
 
 use crate::cli::config::RefinementConfig;
-use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::color::{NUM_COLORS, lab};
 use crate::simd::F32s;
 use crate::zip;
 
@@ -146,6 +151,7 @@ fn refine_window(
     start_layer: usize,
 ) {
     let off = ctx.off;
+    let lab = lab();
     let cand_size = beam.best.len();
 
     // Generation 0: one candidate, the layers above the window unchanged.
@@ -187,11 +193,11 @@ fn refine_window(
                 );
 
                 for c_idx in 0..NUM_COLORS {
-                    let c = COLORS_F32[c_idx];
-                    let err = W_PERCEPTUAL[0] * (res2_0 + res_2a_0 * c[0])
-                        + W_PERCEPTUAL[1] * (res2_1 + res_2a_1 * c[1])
-                        + W_PERCEPTUAL[2] * (res2_2 + res_2a_2 * c[2])
-                        + eff_a2 * COLORS_WSQ_SUM[c_idx];
+                    let c = lab.color[c_idx];
+                    let err = (res2_0 + res_2a_0 * c[0])
+                        + (res2_1 + res_2a_1 * c[1])
+                        + (res2_2 + res_2a_2 * c[2])
+                        + eff_a2 * lab.sq_sum[c_idx];
 
                     if err < beam.best[cand_size - 1].0 {
                         beam.best[cand_size - 1] = (err, cand_idx, p_idx, c_idx);
@@ -203,6 +209,13 @@ fn refine_window(
         }
 
         // Prune: keep everything within `best / threshold`, never a sentinel.
+        // The bound is a *ratio* of errors, so moving the working space from
+        // sRGB (errors ~1e5 larger) to OKLab does not change what it keeps —
+        // `error_threshold` keeps its meaning and its 0.7 default. The one new
+        // edge is that a Lab SSE assembled from signed moments can round to a
+        // hair below zero on a near-perfect cell; then the bound falls below
+        // `best` and the clamp below takes the single best candidate, which is
+        // the right answer for a cell that is already exact.
         let finite = beam.best.partition_point(|c| c.0.is_finite()).max(1);
         n_cand = if ctx.cfg.error_threshold > 0.0 {
             let bound = beam.best[0].0 / ctx.cfg.error_threshold;
@@ -229,7 +242,7 @@ fn refine_window(
                 &mut beam.curr[cand_idx],
                 &beam.prev[from],
                 &ctx.alphas[p_idx],
-                c_idx,
+                lab.color[c_idx],
                 off,
             );
         }
@@ -247,7 +260,13 @@ fn refine_window(
     // This window's top layer is now fixed, so its suffix is too.
     let (left, right) = suffixes.split_at_mut(start_layer + 1);
     let (p, c) = layers[start_layer];
-    build_suffix(&mut left[start_layer], &right[0], &ctx.alphas[p], c, off);
+    build_suffix(
+        &mut left[start_layer],
+        &right[0],
+        &ctx.alphas[p],
+        lab.color[c],
+        off,
+    );
 
     // Prefixes the *next* window (one layer higher up the stack) will read.
     // Prefixes at and above `start_layer` are left stale on purpose: no later
@@ -257,7 +276,13 @@ fn refine_window(
     for layer in update_start..update_end {
         let (left, right) = prefixes.split_at_mut(layer + 1);
         let (p, c) = layers[layer];
-        build_prefix(&left[layer], &mut right[0], &ctx.alphas[p], c, off);
+        build_prefix(
+            &left[layer],
+            &mut right[0],
+            &ctx.alphas[p],
+            lab.color[c],
+            off,
+        );
     }
 }
 
@@ -315,11 +340,11 @@ pub(super) fn build_suffix(
     layer: &mut Suffix,
     suffix: &Suffix,
     alpha: &Plane,
-    color: usize,
+    color: [f32; 3],
     off: usize,
 ) {
     for (ch, plane) in layer.add.iter_mut().enumerate() {
-        let c = F32s::splat(COLORS_F32[color][ch]);
+        let c = F32s::splat(color[ch]);
         for (out, sfx_mul, sfx_add, alp) in zip!(
             mut view_mut(plane, off),
             view(&suffix.mul, off),
@@ -352,9 +377,9 @@ pub(super) fn empty_suffix(suffix: &mut Suffix, off: usize) {
 
 /// Re-choose the base dye given the affine map of the whole layer stack.
 ///
-/// With `d = add − target` the banner is `c·mul + add`, so the weighted SSE is
-/// `Σ w·d² + c·(2·Σ w·mul·d) + c²·Σ w·mul²` — the greedy base sweep with
-/// `Σ mul²` in place of `HW`.
+/// With `d = add − target` the banner is `c·mul + add`, so the SSE is
+/// `Σ d² + c·(2·Σ mul·d) + c²·Σ mul²` — the greedy base sweep with `Σ mul²` in
+/// place of `HW`.
 fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, solution: &mut Solution) {
     let off = ctx.off;
 
@@ -382,14 +407,15 @@ fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, solution: &mut Solution) {
         d_2m[ch] = 2.0 * acc_m.hsum();
     }
 
+    let lab = lab();
     let mut best = solution.base;
     let mut min_err = f32::INFINITY;
     for c_idx in 0..NUM_COLORS {
-        let c = COLORS_F32[c_idx];
-        let err = W_PERCEPTUAL[0] * (d2[0] + d_2m[0] * c[0])
-            + W_PERCEPTUAL[1] * (d2[1] + d_2m[1] * c[1])
-            + W_PERCEPTUAL[2] * (d2[2] + d_2m[2] * c[2])
-            + mul2 * COLORS_WSQ_SUM[c_idx];
+        let c = lab.color[c_idx];
+        let err = (d2[0] + d_2m[0] * c[0])
+            + (d2[1] + d_2m[1] * c[1])
+            + (d2[2] + d_2m[2] * c[2])
+            + mul2 * lab.sq_sum[c_idx];
         if err < min_err {
             min_err = err;
             best = c_idx;
