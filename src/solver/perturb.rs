@@ -8,8 +8,7 @@
 //! 1. keep the `TOP_N` best candidates found so far (initially just the
 //!    refined solution);
 //! 2. make `DUPLICATES` copies of each;
-//! 3. every copy re-rolls the **pattern** of 1–2 random layers, never the top
-//!    one (see below);
+//! 3. every copy re-rolls 1–2 random layers to a random `(pattern, dye)`;
 //! 4. every copy is re-refined by the same windowed beam — this is where the
 //!    quality comes from, the random kick only chooses where to look;
 //! 5. pool the copies with the incumbents, keep the best `TOP_N`;
@@ -18,23 +17,14 @@
 //! Any of the three numbers being `0` disables the stage (the old sentinel,
 //! handled in [`crate::cli::config`], so `perturbations` arrives as `None`).
 //!
-//! ## What a kick may touch, and why (user revision, 2026-08-04)
+//! ## What a kick may touch (measured, 2026-08-04)
 //!
-//! Two deliberate divergences from Python's re-roll, both recorded in
-//! `context/plans/2-solver.md`:
-//!
-//! - **Never the top layer.** Refinement's first window starts at layer `n−1`
-//!   and re-chooses it against every `(pattern, dye)` pair there is, so a kick
-//!   applied to it is undone before it can propagate — a wasted trial. The
-//!   eligible set is layers `0..n−1`; a single-layer cell therefore has none,
-//!   and the whole stage is a no-op for it (returning before the clones, rather
-//!   than re-refining unchanged copies).
-//! - **Only the pattern is re-rolled**, the layer keeps its dye. A random dye
-//!   makes the layer a blot of noise, and the cheapest way for refinement to
-//!   answer that is to have the layers above paint over it — so the search
-//!   spends its trials learning to hide the kick instead of exploring pattern
-//!   combinations. Keeping the dye costs nothing anyway: refinement re-chooses
-//!   the dye for whatever pattern it settles on, in closed form.
+//! Full `(pattern, dye)` on any layer, top included — Python's rule. A
+//! restricted variant (pattern-only, never the top layer) was tried on the
+//! theory that random dyes teach the layers above to paint over the kick;
+//! an A/B across two images × three seeds (`tmp/p5/reroll-ab.txt`) measured
+//! it consistently ~0.5% *worse* at equal wall time, so the unrestricted
+//! rule stands. Recorded in `context/plans/2-solver.md`.
 //!
 //! ## Other differences from Python
 //!
@@ -56,6 +46,7 @@
 //! independent of the seed.
 
 use crate::cli::config::RefinementConfig;
+use crate::color::NUM_COLORS;
 
 use super::refine;
 use super::workspace::{Plane, Solution, Workspace};
@@ -111,9 +102,7 @@ pub(super) fn rounds(
     n: usize,
     rng: &mut Rng,
 ) {
-    // With one layer there is no eligible layer to kick (the top one is off
-    // limits), so every trial would be an exact copy of its parent.
-    if n < 2 || top_n == 0 || duplicates == 0 || rounds == 0 {
+    if n == 0 || top_n == 0 || duplicates == 0 || rounds == 0 {
         return;
     }
 
@@ -161,17 +150,14 @@ pub(super) fn rounds(
     super::workspace::rebuild_prefixes(&mut ws.prefixes, ws.off, solution, alphas, n);
 }
 
-/// Re-roll the pattern of one or two distinct layers, drawn from `0..n−1` —
-/// the top layer is never eligible. See the module docs for both rules.
-///
-/// The caller guarantees `layers.len() >= 2`, so the eligible set is non-empty.
+/// Re-roll one or two distinct layers to a random `(pattern, dye)`. See the
+/// module docs for why the rule is unrestricted.
 fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut Rng) {
-    // Everything below the top layer.
-    let n = layers.len() - 1;
+    let n = layers.len();
     let count = if n > 1 { 1 + rng.below(2) } else { 1 };
 
     let first = rng.below(n);
-    layers[first].0 = rng.below(n_patterns);
+    layers[first] = (rng.below(n_patterns), rng.below(NUM_COLORS));
     if count == 2 {
         // Draw from the other `n - 1` slots so the two are distinct, as
         // Python's `random.sample` guarantees.
@@ -179,6 +165,6 @@ fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut Rng) {
         if second >= first {
             second += 1;
         }
-        layers[second].0 = rng.below(n_patterns);
+        layers[second] = (rng.below(n_patterns), rng.below(NUM_COLORS));
     }
 }
