@@ -1,10 +1,12 @@
 //! sRGB → OKLab, on the [`simd`](crate::simd) facade.
 //!
-//! The solver's own error metric is a weighted SSE in sRGB, which is what makes
-//! its closed-form dye sweep possible ([`crate::color`]). That metric does not
-//! agree with the eye in the dark blues and greens a banner wall is full of, so
-//! the final pass ([`crate::solver::lab`]) rescores a shortlist of candidates by
-//! Euclidean distance in OKLab. This module is that conversion.
+//! The solver's closed-form dye sweep is a weighted SSE in sRGB, which is what
+//! makes scoring 16 dyes from one pass over the patch possible
+//! ([`crate::color`]). That metric does not agree with the eye in the dark
+//! blues and greens a banner wall is full of, so refinement demotes it to a
+//! shortlisting heuristic and ranks the shortlist by Euclidean distance in
+//! OKLab instead ([`crate::solver::refine`]). This module is that conversion —
+//! also used by the background block matcher ([`crate::block`]).
 //!
 //! OKLab (Björn Ottosson, 2020) replaces the Python build's CIELAB + CIEDE2000:
 //! plain Euclidean distance in OKLab is already about as good a perceptual
@@ -31,11 +33,18 @@
 //!   `x²·(A·x + B)`, up to 5.3e-3 absolute error in linear light), this table is
 //!   built by Newton iteration in `const` context and is exact to f32.
 //! - **Cube root** is `f32::cbrt` per lane, i.e. correctly rounded libm rather
-//!   than a vector Newton iteration off a bit-hack seed. Two reasons: this pass
-//!   is off by default, and the LUT already forces a lane round-trip in the
-//!   same function, so the vector version would have to pay the same
-//!   store/load. The bonus is that the NEON and scalar backends produce
-//!   *bit-identical* OKLab values.
+//!   than a vector Newton iteration off a bit-hack seed. The linearisation LUT
+//!   above already forces a lane round-trip inside the same function, so a
+//!   vector cube root would have to pay the same store/load; and doing it in
+//!   libm is what makes the NEON and scalar backends produce *bit-identical*
+//!   OKLab values.
+//!
+//!   Since phase 5 this is the solver's hot loop — refinement converts a whole
+//!   patch per exact candidate — and the cube roots are indeed where the time
+//!   goes. It is left alone deliberately (`context/plans/5-exact-refine.md`):
+//!   an approximate cube root would trade the one thing this module currently
+//!   guarantees, cross-backend identity, for a speedup that
+//!   `--exact-candidates` already exposes as a dial.
 //!
 //! Everything between them — both matrices — is `F32s` arithmetic. There is no
 //! data-dependent branch left in the vector part (the sRGB piecewise lives in

@@ -52,8 +52,11 @@ layer_range = [4, 6]
 # any zero disables it
 # perturbations = [0, 0, 0]
 
-# number of candidates for the perceptual (OKLab) refinement pass
-# lab_refine = 5
+# REMOVED in phase 5: `lab_refine`.
+# The separate perceptual (OKLab) pass is gone; exact perceptual scoring now
+# happens inside refinement, on every window step, and is tuned by
+# `exact_candidates` below. Unknown keys are a hard error, so delete any
+# `lab_refine = N` line you still have in your own config.
 
 # * Refinement Options *
 
@@ -75,3 +78,10 @@ error_threshold = 0.7
 # (this was misspelled 'refine_candidate' in the old build's config.toml;
 #  the option has always been --refinement-candidate)
 refinement_candidate = 5
+
+# candidates per refinement window step that are scored EXACTLY, by perceptual
+# (OKLab) distance on the fully composited banner, instead of by the cheap
+# closed-form sRGB error -- the closed form then only shortlists
+# 0 turns it off: much faster, noticeably worse
+# 8 is the knee of the curve; above 20 the returns are tiny
+exact_candidates = 20

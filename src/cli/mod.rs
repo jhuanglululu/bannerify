@@ -6,7 +6,9 @@
 //! banner rows or columns and the pipeline does the rest.
 //!
 //! Every option is live as of phase 3 — `--exclude-blocks` was the last inert
-//! one and the background matcher now honours it.
+//! one and the background matcher now honours it. Phase 5 removed
+//! `-l/--lab-refine`: exact OKLab scoring is not a final pass any more, it is a
+//! rung inside refinement, tuned by `-x/--exact-candidates`.
 //!
 //! `--debug` is logging only: per-stage timings and memory, no file dumping.
 //! The pipeline is complete, so `<OUTPUT>` is the finished HTML export; the
@@ -110,12 +112,6 @@ pub struct Args {
     #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
 
-    /// Final perceptual (OKLab) pass, scoring the N best candidates per layer
-    /// exactly instead of by the closed-form RGB error [default: off]
-    #[arg(help_heading = "Generation")]
-    #[arg(short = 'l', long, value_name = "NUMBER_OF_CANDIDATES")]
-    pub lab_refine: Option<usize>,
-
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]
@@ -135,4 +131,15 @@ pub struct Args {
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'C', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub refinement_candidate: Option<usize>,
+
+    /// Candidates per refinement window step that are scored EXACTLY, by
+    /// perceptual (OKLab) distance on the fully composited banner, instead of
+    /// by the cheap closed-form sRGB error: [default: 20]. The closed form then
+    /// only shortlists; the beam ranks and prunes on the exact numbers. 0 turns
+    /// the exact scoring off, which is faster and noticeably worse. Below
+    /// --refinement-candidate this also starves the beam, so it is worse than 0
+    /// -- either leave it off or keep it comfortably above the beam width
+    #[arg(help_heading = "Refinement")]
+    #[arg(short = 'x', long, value_name = "NUMBER_OF_CANDIDATES")]
+    pub exact_candidates: Option<usize>,
 }

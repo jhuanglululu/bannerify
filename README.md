@@ -43,15 +43,17 @@ schematics from the buttons at the top.
 The defaults are a good speed/quality balance. For a nicer result:
 
 ```sh
-bannerify input.jpg output.html --row 40 -p 3 4 2 -l 40
+bannerify input.jpg output.html --row 40 -p 3 4 2
 ```
 
 - `-p, --perturbations TOP_N DUPLICATES ROUNDS` — random-restart search on
   top of the base solver. Big quality gain, costs roughly
   `TOP_N × DUPLICATES × ROUNDS` extra solves per banner. `3 4 2` is a
   solid setting.
-- `-l, --lab-refine N` — final perceptual color pass (OKLab). `40` is a
-  solid setting.
+- `-x, --exact-candidates N` — how many candidates each refinement step
+  scores exactly, by perceptual (OKLab) distance, instead of by the cheap
+  approximation (default `20`). Raise it for a slightly closer match,
+  lower it (or `0`) for speed.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds
   and keep the best result.
 - `-L, --layer-range MIN MAX` — how many pattern layers a banner may use

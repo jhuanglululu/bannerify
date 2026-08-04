@@ -443,8 +443,6 @@ fn run(config: &Config) {
             patterns: &patterns,
             refinement: &config.refinement,
             perturbations: config.perturbations,
-            lab_refine: config.lab_refine,
-            report_lab: config.debug,
         },
         seed: config.seed,
     };
@@ -649,7 +647,7 @@ fn run(config: &Config) {
         debug_line("html", t_html, Some(memory::format_bytes(page.len())));
         debug_line("total", started.elapsed(), None);
         println!(
-            "{}: {:<16} {:.1} weighted SSE per cell, {:.4} mean OKLab dE per pixel",
+            "{}: {:<16} {:.3} OKLab dE per cell, {:.4} mean OKLab dE per pixel",
             "debug".blue().bold(),
             "error",
             mean_err,

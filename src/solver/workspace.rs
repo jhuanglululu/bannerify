@@ -34,20 +34,19 @@
 //!   `x ↦ x·mul + add`, per channel. Built walking backwards, the mirror of the
 //!   prefixes ([`super::refine`]).
 //! - `beam` — the refinement window's candidate suffixes and layer lists.
-//! - `cand` — scratch composite for the OKLab pass, and `lab_target` the
-//!   target converted once per cell.
+//! - `cand` — scratch composite for refinement's exact rung, and `lab_target`
+//!   the target converted to OKLab once per cell.
 
 use std::time::Duration;
 
 use crate::cli::config::RefinementConfig;
-use crate::color::W_PERCEPTUAL;
 use crate::geometry::{NTOP_HW, TOP_HW};
 use crate::pattern::Patterns;
 use crate::simd::{Chunk, F32s, LANES};
 use crate::zip;
 
 use super::perturb::Rng;
-use super::{greedy, lab, perturb, refine};
+use super::{greedy, perturb, refine};
 
 /// One patch plane: always the full top-row patch, whatever the row.
 pub type Plane = Chunk<TOP_HW>;
@@ -79,12 +78,13 @@ pub struct Solution {
     pub base: usize,
     /// `(pattern index, dye index)` per layer, in application order.
     pub layers: Vec<(usize, usize)>,
-    /// Weighted SSE of the final composite against the target patch, summed
-    /// over the solved pixels — not normalised.
+    /// OKLab `Σ ΔE` of the final composite against the target patch, summed
+    /// over the solved pixels — not normalised. This is the quantity every
+    /// stage from refinement on optimises and compares on
+    /// ([`super::refine::lab_error`] explains why it is not squared).
     pub error: f32,
-    /// Mean OKLab ΔE per pixel of the final composite, or `0.0` when it was not
-    /// asked for. Reported by `--debug`; never an optimisation target unless
-    /// `--lab-refine` is on.
+    /// [`Solution::error`] per pixel — the number that reads directly as a
+    /// colour difference, and what `--debug` reports.
     pub lab_error: f32,
 }
 
@@ -134,7 +134,7 @@ pub(super) struct Beam {
     pub prev_layers: Vec<Vec<(usize, usize)>>,
     /// Layer choices behind [`Beam::curr`].
     pub curr_layers: Vec<Vec<(usize, usize)>>,
-    /// `(error, candidate, pattern, dye)`, kept sorted ascending.
+    /// `(error, candidate, pattern, dye)` survivors, kept sorted ascending.
     pub best: Vec<(f32, usize, usize, usize)>,
 }
 
@@ -148,13 +148,6 @@ impl Beam {
             best: vec![(f32::INFINITY, 0, 0, 0); cand],
         }
     }
-
-    /// Make this step's output the next step's input. Vectors swap by header,
-    /// so no plane is copied.
-    pub(super) fn swap(&mut self) {
-        std::mem::swap(&mut self.prev, &mut self.curr);
-        std::mem::swap(&mut self.prev_layers, &mut self.curr_layers);
-    }
 }
 
 /// CPU time a work item spent in each solver stage, summed over its cells.
@@ -166,7 +159,9 @@ pub struct Stages {
     pub refine: Duration,
     /// Perturbation rounds (including the re-refinement inside them).
     pub perturb: Duration,
-    /// OKLab final pass (and, under `--debug`, the ΔE readout).
+    /// Per-cell OKLab bookkeeping: converting the target and the final ΔE
+    /// readout. The exact scoring itself is inside refinement, so it is counted
+    /// there.
     pub oklab: Duration,
 }
 
@@ -188,10 +183,6 @@ pub struct SolveCfg<'a> {
     pub refinement: &'a RefinementConfig,
     /// `(top_n, duplicates, rounds)`, or `None` when disabled.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Candidates the OKLab pass scores exactly, or `None` when disabled.
-    pub lab_refine: Option<usize>,
-    /// Report each cell's OKLab ΔE even when the OKLab pass is off (`--debug`).
-    pub report_lab: bool,
 }
 
 /// Reusable solver buffers for one work item.
@@ -210,15 +201,16 @@ pub struct Workspace {
     pub(super) suffixes: Vec<Suffix>,
     /// The refinement window's beam.
     pub(super) beam: Beam,
-    /// Scratch composite for the OKLab pass.
+    /// Scratch composite for refinement's exact rung.
     pub(super) cand: [Plane; 3],
     /// The target converted to OKLab, once per cell.
     pub(super) lab_target: [Plane; 3],
     /// Perturbation beam: `(error, solution)`, kept sorted ascending.
     pub(super) pool: Vec<(f32, Solution)>,
-    /// The OKLab pass's candidate shortlist: `(sRGB error, pattern, dye)` for
-    /// every `patterns x 16` pair of one layer.
-    pub(super) lab_cands: Vec<(f32, usize, usize)>,
+    /// Refinement's exact-scoring shortlist: the `exact_candidates` best
+    /// `(closed-form error, candidate, pattern, dye)` of one window step. Empty
+    /// when the exact rung is off.
+    pub(super) shortlist: Vec<(f32, usize, usize, usize)>,
     /// Trials a perturbation round is about to score.
     pub(super) trials: Vec<Solution>,
     /// Scratch layer list (the refinement's "did this pass change anything"
@@ -242,7 +234,7 @@ impl Workspace {
             beam: Beam::new(candidates.max(1)),
             cand: [Chunk::zeroed(); 3],
             lab_target: [Chunk::zeroed(); 3],
-            lab_cands: Vec::new(),
+            shortlist: Vec::new(),
             pool: Vec::new(),
             trials: Vec::new(),
             scratch: Vec::with_capacity(max_layers),
@@ -270,8 +262,16 @@ impl Workspace {
     }
 
     /// Solve the patch currently in [`Workspace::target_mut`]: greedy fill,
-    /// windowed refinement, perturbation rounds, OKLab pass — each stage
-    /// skipped when its configuration disables it.
+    /// windowed refinement, perturbation rounds — each stage skipped when its
+    /// configuration disables it.
+    ///
+    /// The target is converted to OKLab first, because from refinement on every
+    /// comparison is an exact OKLab one ([`super::refine`]); the same
+    /// conversion then produces the reported [`Solution::error`] and
+    /// [`Solution::lab_error`], whichever stages actually ran. The greedy fill
+    /// is the exception on purpose: it is a coarse initialiser whose only job is
+    /// to hand refinement a starting point, so it stays closed-form sRGB and its
+    /// `error` is overwritten below.
     ///
     /// `rng` is the column's stream; it is advanced only by the perturbation
     /// stage, so a run without `--perturbations` never touches it and the seed
@@ -289,6 +289,10 @@ impl Workspace {
         } else {
             &cfg.patterns.lower_alpha2
         };
+
+        let t = std::time::Instant::now();
+        refine::convert_target(&self.target, &mut self.lab_target, self.off);
+        self.stages.oklab += t.elapsed();
 
         let t = std::time::Instant::now();
         let mut solution = greedy::fill(
@@ -322,11 +326,10 @@ impl Workspace {
             self.stages.perturb += t.elapsed();
         }
 
-        if cfg.lab_refine.is_some() || cfg.report_lab {
-            let t = std::time::Instant::now();
-            lab::pass(self, &mut solution, cfg.lab_refine, alphas, n_layers);
-            self.stages.oklab += t.elapsed();
-        }
+        let t = std::time::Instant::now();
+        solution.error = refine::lab_error(&self.prefixes[n_layers], &self.lab_target, self.off);
+        solution.lab_error = solution.error / self.hw as f32;
+        self.stages.oklab += t.elapsed();
 
         solution
     }
@@ -356,19 +359,4 @@ pub(super) fn rebuild_prefixes(
         let (p, c) = solution.layers[layer];
         greedy::build_prefix(&done[layer], &mut rest[0], &alphas[p], c, off);
     }
-}
-
-/// Weighted SSE of `prefix` against `target` — the number [`Solution::error`]
-/// carries.
-pub(super) fn total_error(prefix: &[Plane; 3], target: &[Plane; 3], off: usize) -> f32 {
-    let mut err = 0.0;
-    for ch in 0..3 {
-        let mut acc = F32s::ZERO;
-        for (p, t) in zip!(view(&prefix[ch], off), view(&target[ch], off)) {
-            let d = p - t;
-            acc = d.mul_add(d, acc);
-        }
-        err += W_PERCEPTUAL[ch] * acc.hsum();
-    }
-    err
 }

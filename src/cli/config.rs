@@ -19,6 +19,15 @@ use serde::Deserialize;
 use crate::cli::Args;
 use crate::logger::error_out;
 
+/// Default `--exact-candidates`.
+///
+/// Chosen by the phase-5 N sweep (`tmp/p5/sweep-summary.txt`): `20` is the
+/// smallest N whose mean ΔE is within 0.5% of `N = 40` on **all four**
+/// benchmark cases (both images × `--row 20` / `--row 100`), and `40` itself
+/// buys another 0.2% for 60% more wall time. `8` is the knee of the curve if
+/// speed matters more than the last 1%.
+const DEFAULT_EXACT_CANDIDATES: usize = 20;
+
 /// The validated, merged configuration the pipeline runs on.
 ///
 /// Every field is live as of phase 3.
@@ -51,8 +60,6 @@ pub struct Config {
     pub refinement: RefinementConfig,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Candidates the OKLab pass scores exactly, or `None` when off.
-    pub lab_refine: Option<usize>,
     /// Perturbation RNG seed; irrelevant unless `perturbations` is set.
     pub seed: u64,
 }
@@ -67,6 +74,9 @@ pub struct RefinementConfig {
     pub error_threshold: f32,
     /// Maximum surviving candidates.
     pub refinement_candidate: usize,
+    /// Candidates per window step re-scored exactly in OKLab; `0` disables the
+    /// exact rung and leaves refinement on the closed-form sRGB error.
+    pub exact_candidates: usize,
 }
 
 /// The TOML config file schema (all keys optional).
@@ -84,8 +94,8 @@ pub struct ConfigToml {
     pub window_size: Option<usize>,
     pub error_threshold: Option<f32>,
     pub refinement_candidate: Option<usize>,
+    pub exact_candidates: Option<usize>,
     pub perturbations: Option<Vec<usize>>,
-    pub lab_refine: Option<usize>,
     pub seed: Option<u64>,
     pub preview: Option<usize>,
     pub render: Option<PathBuf>,
@@ -140,13 +150,16 @@ impl From<Args> for Config {
                     .refinement_candidate
                     .or(config.refinement_candidate)
                     .unwrap_or(5),
+                exact_candidates: args
+                    .exact_candidates
+                    .or(config.exact_candidates)
+                    .unwrap_or(DEFAULT_EXACT_CANDIDATES),
             },
             perturbations: parse_perturbation(
                 &config_path,
                 &args.perturbations,
                 config.perturbations,
             ),
-            lab_refine: args.lab_refine.or(config.lab_refine),
             seed: args.seed.or(config.seed).unwrap_or(0),
         }
     }

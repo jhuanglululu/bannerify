@@ -36,6 +36,54 @@
 //! survivor carries its own suffix cache into the next step. Up to
 //! `refinement_pass` passes, stopping early when a pass changes nothing.
 //!
+//! ## The exact rung (`--exact-candidates N`, phase 5)
+//!
+//! The closed form above minimises a *weighted sRGB SSE*, which is not what the
+//! eye measures. Phase 4 established that solving natively in OKLab does not
+//! help (`context/plans/4-oklab-native.md`): the win of the old `--lab-refine`
+//! pass came from *exactly* scoring a shortlist, and compositing has to happen
+//! in sRGB because that is what the game blends in.
+//!
+//! So each window step is two rungs:
+//!
+//! 1. score the whole `patterns × 16 × candidates` grid with the closed form —
+//!    one pass over the patch per `(candidate, pattern)`, as before;
+//! 2. shortlist `N` of them, build each one's full composite from the
+//!    prefix/suffix caches (`pre·(1−α)·mul + c·α·mul + add`, one `O(HW)` pass),
+//!    convert it to OKLab and score [`lab_error`] against the cell's OKLab
+//!    target.
+//!
+//! The beam's ranking, its `refinement_candidate` survivors and the
+//! `error_threshold` prune all read the **exact** errors, and so does
+//! [`Solution::error`] — the closed form is demoted to a shortlisting heuristic.
+//! `N = 0` turns rung 2 off and restores the pure closed-form behaviour.
+//!
+//! `error_threshold` is a ratio (`best / threshold`), so it is scale-free and
+//! needs no retuning even though OKLab errors are ~10⁴× smaller than sRGB ones.
+//!
+//! ### Which `N` candidates get shortlisted
+//!
+//! Not the flat top `N` of the grid: **one entry per `(candidate, pattern)`
+//! pair — that pair's best dye — and the top `N` of those.** The closed form is
+//! two different qualities of estimate rolled into one number. Choosing the dye
+//! *given* a pattern is a well-conditioned 1-D fit and it gets that essentially
+//! right; ranking whole patterns against each other is where the sRGB/OKLab
+//! mismatch shows, and that is exactly what the exact rung is for. A flat top-N
+//! therefore spends most of its budget on runner-up dyes of the same few
+//! patterns, which is the one axis it did not need to check. Measured on
+//! great_wave at `--row 20` (mean ΔE, lower better):
+//!
+//! ```text
+//!            N=8      N=20     N=40/42
+//! flat       0.0806   —        0.0801
+//! per-pair   0.0797   0.0787   0.0786
+//! ```
+//!
+//! The per-pair shortlist at `N=8` beats the flat one at `N=40` while doing a
+//! fifth of the exact evaluations. Its own ceiling — every pair scored exactly,
+//! `N ≥ candidates × patterns` — is 0.0786; scoring all `672` dyes too reaches
+//! 0.0764, at 13× the wall time. That last 0.002 is not worth it.
+//!
 //! ## Deviations from the old build
 //!
 //! 1. **The beam owns its suffix buffers.** The old code held
@@ -49,10 +97,10 @@
 //!    slots, including the `(∞, 0, 0, 0)` sentinels that survive when fewer
 //!    real candidates were scored. The count is clamped to the finite ones.
 //! 3. **The base dye is re-optimised** at the end of every pass, from
-//!    `suffixes[0]` — the same closed form with `α ≡ 1`. The old Rust build
-//!    left the greedy base alone; Python's `_refine_batch` re-optimises it, and
-//!    the plan makes Python the parity target where the two disagree. It costs
-//!    one pass over the patch per refinement pass.
+//!    `suffixes[0]` (with `α ≡ 1`) — exactly, like everything else, since 16
+//!    candidates need no shortlist. The old Rust build left the greedy base
+//!    alone; Python's `_refine_batch` re-optimises it, and the plan makes
+//!    Python the parity target where the two disagree.
 //! 4. **The final composite is rebuilt.** The old build stopped its end-of-pass
 //!    prefix rebuild one layer short (it never needed `prefixes[n]`); here that
 //!    plane is the answer, so the chain is rebuilt in full and the reported
@@ -60,13 +108,20 @@
 
 use crate::cli::config::RefinementConfig;
 use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::oklab::srgb_to_oklab;
 use crate::simd::F32s;
 use crate::zip;
 
 use super::greedy::build_prefix;
 use super::workspace::{
-    Beam, Plane, Solution, Suffix, Workspace, rebuild_prefixes, total_error, view, view_mut,
+    Beam, Plane, Solution, Suffix, Workspace, rebuild_prefixes, view, view_mut,
 };
+
+/// A scored candidate: `(error, beam candidate, pattern, dye)`.
+type Scored = (f32, usize, usize, usize);
+
+/// The sentinel a top-list slot holds until a real candidate displaces it.
+const NO_CAND: Scored = (f32::INFINITY, 0, 0, 0);
 
 /// Everything a window needs that does not change inside one.
 struct Ctx<'a> {
@@ -74,10 +129,33 @@ struct Ctx<'a> {
     off: usize,
     /// The cell's target planes.
     target: &'a [Plane; 3],
+    /// The cell's target planes, in OKLab.
+    lab_target: &'a [Plane; 3],
     /// The pattern table.
     alphas: &'a [Plane],
-    /// Beam width, window length, pruning threshold, pass count.
+    /// Beam width, window length, pruning threshold, pass count, exact top-N.
     cfg: &'a RefinementConfig,
+}
+
+/// Insert `entry` into an ascending top-list of fixed length, dropping its
+/// current worst. A candidate no better than the worst costs one comparison,
+/// which is the common case across a 42 × 16 grid.
+///
+/// Ties keep the earlier insertion first, so the surviving order does not
+/// depend on a sort's tie-breaking — one less thing that could differ between
+/// SIMD backends.
+#[inline]
+fn push_top(list: &mut [Scored], entry: Scored) {
+    let n = list.len();
+    if entry.0 >= list[n - 1].0 {
+        return;
+    }
+    let mut i = n - 1;
+    while i > 0 && list[i - 1].0 > entry.0 {
+        list[i] = list[i - 1];
+        i -= 1;
+    }
+    list[i] = entry;
 }
 
 /// Refine `solution` in place, leaving the prefix chain and its error
@@ -97,9 +175,12 @@ pub(super) fn refine(
     let Workspace {
         off,
         target,
+        lab_target,
         prefixes,
         suffixes,
         beam,
+        cand,
+        shortlist,
         scratch,
         ..
     } = ws;
@@ -107,9 +188,18 @@ pub(super) fn refine(
     let ctx = Ctx {
         off,
         target,
+        lab_target,
         alphas,
         cfg,
     };
+
+    // One slot per exact candidate, refilled with sentinels each window step.
+    // Rung 1 offers at most one entry per (beam candidate, pattern), so asking
+    // for more slots than that only wastes memory.
+    let n_exact = cfg
+        .exact_candidates
+        .min(beam.best.len() * alphas.len().max(1));
+    shortlist.resize(n_exact, NO_CAND);
 
     rebuild_prefixes(prefixes, off, solution, alphas, n);
     empty_suffix(&mut suffixes[n], off);
@@ -120,12 +210,21 @@ pub(super) fn refine(
         let previous_base = solution.base;
 
         for start in (0..n).rev() {
-            refine_window(&ctx, prefixes, suffixes, beam, &mut solution.layers, start);
+            refine_window(
+                &ctx,
+                prefixes,
+                suffixes,
+                beam,
+                cand,
+                shortlist,
+                &mut solution.layers,
+                start,
+            );
         }
 
         // `suffixes[0]` now maps a base colour through the whole layer stack,
-        // so choosing the base is the same closed form with `α ≡ 1`.
-        reopt_base(&ctx, &suffixes[0], solution);
+        // so choosing the base is the same problem with `α ≡ 1`.
+        reopt_base(&ctx, &suffixes[0], cand, solution);
         rebuild_prefixes(prefixes, off, solution, alphas, n);
 
         if solution.base == previous_base && solution.layers == *scratch {
@@ -133,32 +232,44 @@ pub(super) fn refine(
         }
     }
 
-    solution.error = total_error(&prefixes[n], target, off);
+    solution.error = lab_error(&prefixes[n], lab_target, off);
 }
 
 /// Re-choose up to `window_size` layers ending at `start_layer`, as a beam.
+#[allow(clippy::too_many_arguments)]
 fn refine_window(
     ctx: &Ctx<'_>,
     prefixes: &mut [[Plane; 3]],
     suffixes: &mut [Suffix],
     beam: &mut Beam,
+    cand: &mut [Plane; 3],
+    shortlist: &mut [Scored],
     layers: &mut [(usize, usize)],
     start_layer: usize,
 ) {
     let off = ctx.off;
-    let cand_size = beam.best.len();
+    // Destructured so the exact rung can read `prev` while writing `best`.
+    let Beam {
+        prev,
+        curr,
+        prev_layers,
+        curr_layers,
+        best,
+    } = beam;
+    let cand_size = best.len();
+    let n_exact = shortlist.len();
 
     // Generation 0: one candidate, the layers above the window unchanged.
-    beam.prev[0].copy_from(&suffixes[start_layer + 1], off);
-    beam.prev_layers[0].clear();
+    prev[0].copy_from(&suffixes[start_layer + 1], off);
+    prev_layers[0].clear();
     let mut n_cand = 1;
 
     'sliding: for k in 0..ctx.cfg.window_size {
         let layer_idx = start_layer - k;
-        beam.best.fill((f32::INFINITY, 0, 0, 0));
+        best.fill(NO_CAND);
+        shortlist.fill(NO_CAND);
 
-        for cand_idx in 0..n_cand {
-            let sfx = &beam.prev[cand_idx];
+        for (cand_idx, sfx) in prev.iter().enumerate().take(n_cand) {
             let prefix = &prefixes[layer_idx];
 
             for (p_idx, alpha) in ctx.alphas.iter().enumerate() {
@@ -186,39 +297,69 @@ fn refine_window(
                     view(&sfx.add[2], off),
                 );
 
-                for c_idx in 0..NUM_COLORS {
-                    let c = COLORS_F32[c_idx];
+                // Rung 1. With the exact rung off the closed form *is* the
+                // ranking; with it on, only this pattern's best dye is
+                // shortlisted — see the module docs for why the runners-up are
+                // not worth an exact evaluation.
+                let mut pattern_best = NO_CAND;
+                for (c_idx, c) in COLORS_F32.iter().enumerate() {
                     let err = W_PERCEPTUAL[0] * (res2_0 + res_2a_0 * c[0])
                         + W_PERCEPTUAL[1] * (res2_1 + res_2a_1 * c[1])
                         + W_PERCEPTUAL[2] * (res2_2 + res_2a_2 * c[2])
                         + eff_a2 * COLORS_WSQ_SUM[c_idx];
 
-                    if err < beam.best[cand_size - 1].0 {
-                        beam.best[cand_size - 1] = (err, cand_idx, p_idx, c_idx);
-                        beam.best
-                            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).expect("no NaN errors"));
+                    let entry = (err, cand_idx, p_idx, c_idx);
+                    if n_exact == 0 {
+                        push_top(best, entry);
+                    } else if err < pattern_best.0 {
+                        pattern_best = entry;
                     }
+                }
+                if n_exact > 0 {
+                    push_top(shortlist, pattern_best);
                 }
             }
         }
 
+        // Rung 2: build each shortlisted candidate's whole banner and score it
+        // in OKLab. This is the only ranking the beam below ever sees.
+        for &(closed, cand_idx, p_idx, c_idx) in shortlist.iter() {
+            if !closed.is_finite() {
+                break;
+            }
+            composite(
+                cand,
+                &prefixes[layer_idx],
+                &ctx.alphas[p_idx],
+                c_idx,
+                &prev[cand_idx],
+                off,
+            );
+            push_top(
+                best,
+                (lab_error(cand, ctx.lab_target, off), cand_idx, p_idx, c_idx),
+            );
+        }
+
         // Prune: keep everything within `best / threshold`, never a sentinel.
-        let finite = beam.best.partition_point(|c| c.0.is_finite()).max(1);
+        // The threshold is a ratio, so it means the same thing whichever rung
+        // produced the numbers.
+        let finite = best.partition_point(|c| c.0.is_finite()).max(1);
         n_cand = if ctx.cfg.error_threshold > 0.0 {
-            let bound = beam.best[0].0 / ctx.cfg.error_threshold;
-            beam.best.partition_point(|c| c.0 <= bound)
+            let bound = best[0].0 / ctx.cfg.error_threshold;
+            best.partition_point(|c| c.0 <= bound)
         } else {
             cand_size
         }
         .clamp(1, finite);
 
         for cand_idx in 0..n_cand {
-            let (_, from, p_idx, c_idx) = beam.best[cand_idx];
+            let (_, from, p_idx, c_idx) = best[cand_idx];
 
-            beam.curr_layers[cand_idx].clear();
-            let (curr, prev) = (&mut beam.curr_layers[cand_idx], &beam.prev_layers[from]);
-            curr.extend_from_slice(prev);
-            curr.push((p_idx, c_idx));
+            curr_layers[cand_idx].clear();
+            let (to, source) = (&mut curr_layers[cand_idx], &prev_layers[from]);
+            to.extend_from_slice(source);
+            to.push((p_idx, c_idx));
 
             // Layer 0 has nothing below it, so no further step can follow and
             // the suffix would never be read.
@@ -226,8 +367,8 @@ fn refine_window(
                 break 'sliding;
             }
             build_suffix(
-                &mut beam.curr[cand_idx],
-                &beam.prev[from],
+                &mut curr[cand_idx],
+                &prev[from],
                 &ctx.alphas[p_idx],
                 c_idx,
                 off,
@@ -235,12 +376,13 @@ fn refine_window(
         }
 
         if k < ctx.cfg.window_size - 1 {
-            beam.swap();
+            std::mem::swap(prev, curr);
+            std::mem::swap(prev_layers, curr_layers);
         }
     }
 
     // The winning chain, deepest layer first.
-    for (i, pc) in beam.curr_layers[0].iter().enumerate() {
+    for (i, pc) in curr_layers[0].iter().enumerate() {
         layers[start_layer - i] = *pc;
     }
 
@@ -338,6 +480,78 @@ pub(super) fn build_suffix(
     }
 }
 
+/// The full banner for laying `color` through `alpha` on top of `prefix`, with
+/// `suffix` applying every layer above it — the composite the exact rung scores.
+///
+/// This is the *sRGB* composite, deliberately: the game blends dye colours in
+/// sRGB, so this is the pixel a player will actually see. Phase 4 measured what
+/// blending in OKLab instead costs (1-3% ΔE on anti-aliased pattern edges).
+pub(super) fn composite(
+    out: &mut [Plane; 3],
+    prefix: &[Plane; 3],
+    alpha: &Plane,
+    color: usize,
+    suffix: &Suffix,
+    off: usize,
+) {
+    for ch in 0..3 {
+        let c = F32s::splat(COLORS_F32[color][ch]);
+        for (out, pre, alp, mul, add) in zip!(
+            mut view_mut(&mut out[ch], off),
+            view(&prefix[ch], off),
+            view(alpha, off),
+            view(&suffix.mul, off),
+            view(&suffix.add[ch], off)
+        ) {
+            *out = pre.mul_add(F32s::ONE - alp, c * alp).mul_add(mul, add);
+        }
+    }
+}
+
+/// The cell's target patch, converted to OKLab once per cell.
+pub(super) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usize) {
+    let (l, rest) = out.split_at_mut(1);
+    let (a, b) = rest.split_at_mut(1);
+    for (l, a, b, r, g, bl) in zip!(
+        mut view_mut(&mut l[0], off),
+        mut view_mut(&mut a[0], off),
+        mut view_mut(&mut b[0], off),
+        view(&target[0], off),
+        view(&target[1], off),
+        view(&target[2], off)
+    ) {
+        (*l, *a, *b) = srgb_to_oklab(r, g, bl);
+    }
+}
+
+/// `Σ ΔE` between an sRGB composite and the OKLab target planes — the number
+/// the beam ranks on and [`Solution::error`] carries.
+///
+/// Summed *un-squared*, deliberately. Minimising `Σ ΔE²` is a different problem
+/// and measurably the wrong one here: on great_wave at `--row 20` it reaches a
+/// lower `Σ ΔE²` (6.56 vs 6.77 per cell) and a **worse** picture (0.0815 vs
+/// 0.0797 mean ΔE). Squaring buys uniformity of error at the price of the
+/// average, and the average is what a viewer sees — a banner wall is a mosaic
+/// of 20×40 patches, not a smooth gradient, so there is no visible seam to
+/// protect. `Σ ΔE` is also exactly the quantity `--debug` reports, so the
+/// solver optimises the number it is judged on.
+pub(super) fn lab_error(rgb: &[Plane; 3], lab_target: &[Plane; 3], off: usize) -> f32 {
+    let mut acc = F32s::ZERO;
+    for (r, g, b, tl, ta, tb) in zip!(
+        view(&rgb[0], off),
+        view(&rgb[1], off),
+        view(&rgb[2], off),
+        view(&lab_target[0], off),
+        view(&lab_target[1], off),
+        view(&lab_target[2], off)
+    ) {
+        let (l, a, b) = srgb_to_oklab(r, g, b);
+        let (dl, da, db) = (l - tl, a - ta, b - tb);
+        acc += dl.mul_add(dl, da.mul_add(da, db * db)).sqrt();
+    }
+    acc.hsum()
+}
+
 /// The identity suffix: nothing is painted over these layers.
 pub(super) fn empty_suffix(suffix: &mut Suffix, off: usize) {
     for ch in 0..3 {
@@ -350,13 +564,44 @@ pub(super) fn empty_suffix(suffix: &mut Suffix, off: usize) {
     }
 }
 
-/// Re-choose the base dye given the affine map of the whole layer stack.
+/// Re-choose the base dye at the end of a pass, given the affine map of the
+/// whole layer stack above it.
 ///
-/// With `d = add − target` the banner is `c·mul + add`, so the weighted SSE is
-/// `Σ w·d² + c·(2·Σ w·mul·d) + c²·Σ w·mul²` — the greedy base sweep with
-/// `Σ mul²` in place of `HW`.
-fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, solution: &mut Solution) {
+/// There is no shortlist here — there are only 16 candidates — so with the
+/// exact rung on, all 16 are simply scored exactly, the same ranking the window
+/// steps use. `suffixes[0]` maps a flat fill through every layer, so a base dye
+/// `c` paints `c·mul + add` and building each candidate is one `O(HW)` pass.
+fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &mut Solution) {
     let off = ctx.off;
+
+    if ctx.cfg.exact_candidates > 0 {
+        let mut best = solution.base;
+        let mut min_err = f32::INFINITY;
+        for (c_idx, color) in COLORS_F32.iter().enumerate() {
+            for (ch, &component) in color.iter().enumerate() {
+                let c = F32s::splat(component);
+                for (o, mul, add) in zip!(
+                    mut view_mut(&mut out[ch], off),
+                    view(&suffix.mul, off),
+                    view(&suffix.add[ch], off)
+                ) {
+                    *o = c.mul_add(mul, add);
+                }
+            }
+            let err = lab_error(out, ctx.lab_target, off);
+            if err < min_err {
+                min_err = err;
+                best = c_idx;
+            }
+        }
+        solution.base = best;
+        return;
+    }
+
+    // Closed form, for `--exact-candidates 0`. With `d = add − target` the
+    // banner is `c·mul + add`, so the weighted sRGB SSE is
+    // `Σ w·d² + c·(2·Σ w·mul·d) + c²·Σ w·mul²` — the greedy base sweep with
+    // `Σ mul²` in place of `HW`.
 
     let mut acc = F32s::ZERO;
     for m in zip!(view(&suffix.mul, off)) {
