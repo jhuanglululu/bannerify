@@ -1,10 +1,8 @@
-//! Turning a source image + a requested wall size into a resize job.
+//! Turning a source image + a requested wall size into a resize job: banner
+//! grid inference, source window, and placement inside the wall.
 //!
-//! Ported from `../bannerify-old/src/image/resize.rs`, minus the resizing
-//! itself: this module only does the arithmetic (banner grid inference, source
-//! window, placement inside the wall), and the streamed resampler consumes it.
 //! Cropping is expressed as a source [`Window`], never as a materialised
-//! sub-image — see `context/designs/streamed-lanczos.md` memory rules.
+//! sub-image.
 
 use crate::geometry::{infer_dimension, wall_height, wall_width};
 use crate::resample::Window;
@@ -53,13 +51,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Whether the resampled region covers the whole wall.
     pub fn is_padded(&self) -> bool {
         self.pad.is_some()
             && (self.target_width != self.wall_width || self.target_height != self.wall_height)
     }
 
-    /// Resolve the grid, source window and placement for one image.
     pub fn compute(
         img_width: u32,
         img_height: u32,
@@ -118,7 +114,6 @@ impl Layout {
                 }
             }
             ResizingMethod::Fill(color) => {
-                // Scale to fit inside the wall; the rest of the wall is padding.
                 let scale = f64::min(wall_w as f64 / iw, wall_h as f64 / ih);
                 let target_w = ((iw * scale).ceil() as usize).clamp(1, wall_w);
                 let target_h = ((ih * scale).ceil() as usize).clamp(1, wall_h);

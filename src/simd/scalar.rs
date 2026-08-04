@@ -1,7 +1,4 @@
 //! Scalar fallback backend: `LANES == 1`, one `f32` per [`F32s`].
-//!
-//! Correctness oracle for the vector backends and the portable path on
-//! architectures without a hand-written backend. Not a shipping fast path.
 
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -19,12 +16,9 @@ pub struct F32s(f32);
 pub struct Mask(bool);
 
 impl F32s {
-    /// All lanes zero.
     pub const ZERO: Self = Self(0.0);
-    /// All lanes one.
     pub const ONE: Self = Self(1.0);
 
-    /// Broadcast `x` to every lane.
     #[inline(always)]
     pub fn splat(x: f32) -> Self {
         Self(x)
@@ -42,46 +36,37 @@ impl F32s {
         self.0
     }
 
-    /// Lane-wise square root.
     #[inline(always)]
     pub fn sqrt(self) -> Self {
         Self(self.0.sqrt())
     }
 
-    /// Lane-wise minimum.
     #[inline(always)]
     pub fn min(self, other: Self) -> Self {
         Self(self.0.min(other.0))
     }
 
-    /// Lane-wise maximum.
     #[inline(always)]
     pub fn max(self, other: Self) -> Self {
         Self(self.0.max(other.0))
     }
 
-    /// Lane-wise `self < other`.
     #[inline(always)]
     pub fn simd_lt(self, other: Self) -> Mask {
         Mask(self.0 < other.0)
     }
 
-    /// Lane-wise `self > other`.
     #[inline(always)]
     pub fn simd_gt(self, other: Self) -> Mask {
         Mask(self.0 > other.0)
     }
 
     /// Build a register from lane values, in order.
-    ///
-    /// The inverse of [`F32s::to_array`]; see the NEON backend for why it
-    /// exists (per-lane table lookups, which no vector ISA here can express).
     #[inline(always)]
     pub fn from_array(v: [f32; LANES]) -> Self {
         Self(v[0])
     }
 
-    /// Lane values, in order. Diagnostics and cold paths only.
     #[inline(always)]
     pub fn to_array(self) -> [f32; LANES] {
         [self.0]
@@ -89,7 +74,6 @@ impl F32s {
 }
 
 impl Mask {
-    /// Lane-wise `if mask { a } else { b }`.
     #[inline(always)]
     pub fn select(self, a: F32s, b: F32s) -> F32s {
         if self.0 { a } else { b }

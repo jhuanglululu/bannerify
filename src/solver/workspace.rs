@@ -1,41 +1,13 @@
 //! The per-work-item solver workspace: every buffer a cell solve touches, in
 //! one allocation, reused down the column.
 //!
-//! ## One workspace, two patch sizes
-//!
-//! Stage 2a carried two monomorphised workspaces, `Workspace<TOP_HW>` for
-//! banner row 0 and `Workspace<NTOP_HW>` for every other row. Stage 2b merges
-//! them (`context/plans/2-solver.md`, "Stage-2b addition"): every plane is a
-//! [`Plane`] — a `Chunk<TOP_HW>`, the top-row size — and a lower row solves on
-//! the **lane-aligned tail view** of each plane, elements `TOP_HW - NTOP_HW ..
-//! TOP_HW` (`320..800`). `320 % 16 == 0`, so that view starts on a lane
-//! boundary — and on a 64-byte boundary — at every backend width, from scalar
-//! to AVX-512.
-//!
-//! The kernels therefore take `&[F32s]` / `&mut [F32s]` lane views with a
-//! runtime length instead of being generic over `HW`. That is one
-//! monomorphisation instead of two, half the instruction cache, and the loops
-//! are unchanged: they were already lane loops over a `zip!` of equal-length
-//! streams, and a runtime trip count costs an induction variable, not a bounds
-//! check (`zip!` iterates, it does not index).
-//!
-//! Reuse across cells stays free: every field a cell reads is fully overwritten
-//! before it is read, so nothing is zeroed between cells. Only the *active
-//! view* of each plane is ever written, so the head of a lower row's planes
-//! holds whatever the last top-row cell left there — which is exactly why
-//! nothing may read outside the view.
-//!
-//! ## Contents
-//!
-//! - `target` — the cell's pixels, planar ([`crate::solver::cell`] fills it).
-//! - `prefixes[i]` — the composite after `i` layers; `prefixes[0]` is the flat
-//!   base, `prefixes[depth]` is what the preview draws.
-//! - `suffixes[i]` — the affine map "apply layers `i..` to a colour":
-//!   `x ↦ x·mul + add`, per channel. Built walking backwards, the mirror of the
-//!   prefixes ([`super::refine`]).
-//! - `beam` — the refinement window's candidate suffixes and layer lists.
-//! - `cand` — scratch composite for refinement's exact rung, and `lab_target`
-//!   the target converted to OKLab once per cell.
+//! Every plane is a full top-row [`Plane`], and a lower banner row solves on
+//! the lane-aligned tail view of it (elements `TOP_HW - NTOP_HW ..`), so the
+//! kernels take runtime-length lane views instead of being generic over the
+//! patch size. Only that active view is ever written, so the head of a lower
+//! row's planes holds whatever the last top-row cell left there — nothing may
+//! read outside the view. Nothing is zeroed between cells for the same reason:
+//! every field is fully overwritten before it is read.
 
 use std::time::Duration;
 
@@ -93,8 +65,6 @@ pub struct Solution {
 ///
 /// `mul` is channel-independent (it is a product of `1 − α`), which is what
 /// lets the refinement kernel reduce `Σ (α·mul)²` once for all three channels.
-/// Ported from the old build's `SuffixPatternCache`, which packed the same four
-/// planes into one array.
 pub(super) struct Suffix {
     /// Additive term per channel.
     pub add: [Plane; 3],
@@ -160,13 +130,11 @@ pub struct Stages {
     /// Perturbation rounds (including the re-refinement inside them).
     pub perturb: Duration,
     /// Per-cell OKLab bookkeeping: converting the target and the final ΔE
-    /// readout. The exact scoring itself is inside refinement, so it is counted
-    /// there.
+    /// readout. The exact scoring itself is counted under refinement.
     pub oklab: Duration,
 }
 
 impl Stages {
-    /// Fold another item's totals into these.
     pub fn add(&mut self, other: &Stages) {
         self.greedy += other.greedy;
         self.refine += other.refine;
@@ -213,8 +181,8 @@ pub struct Workspace {
     pub(super) shortlist: Vec<(f32, usize, usize, usize)>,
     /// Trials a perturbation round is about to score.
     pub(super) trials: Vec<Solution>,
-    /// Scratch layer list (the refinement's "did this pass change anything"
-    /// snapshot), kept in the workspace so a pass allocates nothing.
+    /// Scratch layer list: the refinement's "did this pass change anything"
+    /// snapshot.
     pub(super) scratch: Vec<(usize, usize)>,
     /// Per-stage CPU time, accumulated over the item's cells.
     pub stages: Stages,
@@ -243,20 +211,20 @@ impl Workspace {
     }
 
     /// Point the workspace at banner row `row`'s patch size. Call before
-    /// gathering the cell's pixels — [`Workspace::target_mut`] hands out the
-    /// whole plane, but only the active view is meaningful.
+    /// gathering the cell's pixels.
     pub fn begin(&mut self, row: usize) {
         self.off = if row == 0 { 0 } else { LOWER_OFF };
         self.hw = TOP_HW - self.off * LANES;
     }
 
-    /// The target planes, to be overwritten with the next cell's patch.
+    /// The target planes, to be overwritten with the next cell's patch. Only
+    /// the active view is meaningful.
     pub fn target_mut(&mut self) -> &mut [Plane; 3] {
         &mut self.target
     }
 
-    /// The composite the last [`Workspace::solve`] produced — what the preview
-    /// draws. Only the active view holds this cell's pixels.
+    /// The composite the last [`Workspace::solve`] produced. Only the active
+    /// view holds this cell's pixels.
     pub fn composite(&self) -> &[Plane; 3] {
         &self.prefixes[self.depth]
     }
@@ -266,21 +234,10 @@ impl Workspace {
     /// configuration disables it.
     ///
     /// The target is converted to OKLab first, because from refinement on every
-    /// comparison is an exact OKLab one ([`super::refine`]); the same
-    /// conversion then produces the reported [`Solution::error`] and
-    /// [`Solution::lab_error`], whichever stages actually ran. The greedy fill
-    /// is the exception on purpose: it is a coarse initialiser whose only job is
-    /// to hand refinement a starting point, so it stays closed-form sRGB and its
-    /// `error` is overwritten below.
-    ///
-    /// `rng` is the column's stream; it is advanced only by the perturbation
-    /// stage, so a run without `--perturbations` never touches it and the seed
-    /// cannot change the result.
+    /// comparison is an exact OKLab one. The greedy fill is the exception on
+    /// purpose: it is a coarse initialiser, so it stays closed-form sRGB and
+    /// its `error` is overwritten below.
     pub fn solve(&mut self, n_layers: usize, cfg: &SolveCfg<'_>, rng: &mut Rng) -> Solution {
-        assert!(
-            n_layers < self.prefixes.len(),
-            "workspace built for fewer layers than requested"
-        );
         self.depth = n_layers;
 
         let alphas = &cfg.patterns.top;
@@ -339,8 +296,7 @@ impl Workspace {
 /// choices leaves the prefix chain consistent with them.
 ///
 /// A free function rather than a method: the stages hold the workspace
-/// destructured (they need `prefixes`, `suffixes` and `beam` borrowed at once),
-/// so a `&mut self` method would not be callable from inside one.
+/// destructured, so a `&mut self` method would not be callable from inside one.
 pub(super) fn rebuild_prefixes(
     prefixes: &mut [[Plane; 3]],
     off: usize,

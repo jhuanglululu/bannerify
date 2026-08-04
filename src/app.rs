@@ -1,26 +1,12 @@
 //! Application entry point: the pipeline as one flat `par_iter` over block
 //! columns.
 //!
-//! One work item is one block column (`context/designs/pipeline.md`): a
-//! full-height, 24-pixel-wide slice of the wall. The closure borrows the source
-//! planes, the shared vertical weights, the pattern and block tables, the layer
-//! grid and the layout; it builds its own horizontal weights, resamples its own
-//! column band locally, matches a background block for each of its block cells,
-//! solves its banner cells top to bottom, and paints all of it into its own
-//! strip — no shared mutable state, no locking, no cross-item handoff.
-//!
 //! Columns, never rows: banners bridge every horizontal block seam, so no
-//! horizontal cut lets an item own complete block cells, while a vertical cut on
-//! a block-column boundary cuts nothing (banners never cross columns). The
+//! horizontal cut lets an item own complete block cells, while a vertical cut
+//! on a block-column boundary cuts nothing (banners never cross columns). The
 //! banner-over-banner overlap and the block-behind-banner compositing are then
-//! entirely internal to an item.
-//!
-//! Phase 3 completes the pipeline, so the tool's normal output is no longer an
-//! intermediate: `<OUTPUT>` is the self-contained HTML export, and the phase-2
-//! intermediates (the bare wall PNG, the per-cell JSONL) are gone — earlier
-//! intermediates are deleted when a later stage lands, never kept behind a flag.
-//! The full-resolution wall is still available, but only when asked for by name:
-//! `--render PATH`.
+//! entirely internal to an item — no shared mutable state, no locking, no
+//! cross-item handoff.
 
 use std::ops::Range;
 use std::path::Path;
@@ -46,7 +32,6 @@ use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
 use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace};
 
-/// Channels the pipeline works in (RGB; the decoder normalises to this).
 const CHANNELS: usize = 3;
 
 // ---------------------------------------------------------------- work items
@@ -60,8 +45,6 @@ struct Rect {
     y: usize,
     /// Width in pixels.
     width: usize,
-    /// Height in pixels.
-    height: usize,
 }
 
 /// One unit of parallel work: one block column of the wall.
@@ -81,9 +64,6 @@ struct ColItem {
     dest_rect: Rect,
     /// Columns of the resample target this item covers.
     target_cols: Range<usize>,
-    /// Canvas columns this item owns exclusively (its strip). Always exactly one
-    /// block wide: block columns tile the wall with nothing left over.
-    strip_cols: Range<usize>,
 }
 
 /// Everything a column item borrows.
@@ -125,7 +105,6 @@ struct ColOutcome {
     stages: Stages,
 }
 
-/// Split the wall into one item per block column.
 fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
     let (ox, oy) = layout.origin;
     (0..layout.columns)
@@ -150,10 +129,8 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
                     x: lo,
                     y: oy,
                     width: target_cols.len(),
-                    height: layout.target_height,
                 },
                 target_cols,
-                strip_cols,
             }
         })
         .collect()
@@ -161,24 +138,16 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
 
 /// Produce one block column of the wall.
 ///
-/// Shared borrows arrive through `ctx`; the strip the item paints is its own
-/// local buffer (`wall_height × 24 × 3` bytes, part of the item's bounded
-/// memory), interleaved into the canvas by the driver afterwards. Why local
-/// rather than a slice of the canvas: the canvas is row-major, so a column of it
-/// is not a contiguous `&mut [u8]` and `split_at_mut` cannot hand one out.
-/// Painting locally and interleaving once keeps the whole pipeline in safe code,
-/// and the copy lands in a buffer that has to exist for the downscale anyway.
+/// The strip the item paints is its own local buffer rather than a slice of the
+/// canvas: the canvas is row-major, so a column of it is not a contiguous
+/// `&mut [u8]` and `split_at_mut` cannot hand one out. Painting locally and
+/// interleaving once keeps the whole pipeline in safe code.
 ///
-/// Order inside the item is the order the wall is built in: blocks first, over
-/// the whole strip, then banners over them. Nothing has to be composited, because
-/// the banners' visible regions tile exactly and the block pixels that survive
-/// are precisely the hollow frame the matcher scored ([`crate::block`]).
+/// Blocks are painted first, over the whole strip, then banners over them.
+/// Nothing has to be composited, because the banners' visible regions tile
+/// exactly and the block pixels that survive are precisely the hollow frame the
+/// matcher scored ([`crate::block`]).
 fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
-    debug_assert_eq!(
-        item.strip_cols.len(),
-        BLOCK_SIDE,
-        "one item, one block column"
-    );
     let mut strip = vec![0u8; ctx.layout.wall_height * STRIP_PITCH];
 
     // The column's own band, resampled locally out of the source region
@@ -191,11 +160,6 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
             .resample(ctx.source)
     });
     let resample = t.elapsed();
-    debug_assert!(band.as_ref().is_none_or(|b| b.channels() == CHANNELS));
-    debug_assert!(
-        band.as_ref()
-            .is_none_or(|b| b.height == item.dest_rect.height)
-    );
 
     let view = BandView::new(
         band.as_ref(),
@@ -339,7 +303,6 @@ fn check_cpu_features() {
     }
 }
 
-/// No-op: this build's SIMD backend has no runtime CPU requirements.
 #[cfg(not(all(
     target_arch = "x86_64",
     target_feature = "avx2",
@@ -348,7 +311,6 @@ fn check_cpu_features() {
 )))]
 fn check_cpu_features() {}
 
-/// Decode, lay out, run the column items, write the export.
 fn run(config: &Config) {
     let started = Instant::now();
 
@@ -663,7 +625,6 @@ fn run(config: &Config) {
     }
 }
 
-/// Encode interleaved RGB in memory.
 fn encode(data: &[u8], width: usize, height: usize, format: image::ImageFormat) -> Vec<u8> {
     let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
         .unwrap_or_else(|| error_out!("internal error: image buffer has the wrong size"));
@@ -673,7 +634,6 @@ fn encode(data: &[u8], width: usize, height: usize, format: image::ImageFormat) 
     out.into_inner()
 }
 
-/// Write interleaved RGB straight to a PNG file (`--render`).
 fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
     let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
         .unwrap_or_else(|| error_out!("internal error: canvas has the wrong size"));
@@ -686,7 +646,6 @@ fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
     });
 }
 
-/// One `debug: <stage> <time>` line.
 fn debug_line(stage: &str, d: Duration, note: Option<String>) {
     let note = note.map(|n| format!("   {n}")).unwrap_or_default();
     println!(

@@ -1,24 +1,10 @@
 //! The variance pre-pass: how many layers each banner cell gets.
 //!
-//! Detail costs layers, and flat cells waste them, so the layer budget is
-//! spread by how busy each cell's *source* pixels are. Ported from the old
-//! Rust build's `solver/complexity.rs` (`sort_banner`), which in turn is the
-//! Python build's `_banner_complexity`: per cell, the sum over channels of that
-//! channel's variance `E[x²] − E[x]²`; then a global min/max normalisation maps
-//! the busiest cell to `layer_range.1` layers and the flattest to
-//! `layer_range.0`.
-//!
-//! Two deliberate departures from the old builds, both from
-//! `context/designs/pipeline.md`:
-//!
-//! - It runs on the **source image**, over each cell's source window, not on
-//!   the resampled wall. The pipeline never materialises the resampled wall —
-//!   each row band is closure-local — and a pre-pass that needs one would
-//!   defeat that. Source pixels are also the honest measure of how much detail
-//!   the cell is being asked to stand in for.
-//! - It runs **before** the row `par_iter` (it is trivially parallel over
-//!   cells) so the whole grid is available to every row item at once, which is
-//!   what the global min/max normalisation requires.
+//! Per cell, the sum over channels of that channel's source-pixel variance
+//! `E[x²] − E[x]²`; a global min/max normalisation then maps the busiest cell
+//! to `layer_range.1` layers and the flattest to `layer_range.0`. It runs on
+//! the source image, before the wall is cut into work items, because the global
+//! normalisation needs every cell's variance at once.
 
 use rayon::prelude::*;
 
@@ -41,7 +27,7 @@ impl LayerGrid {
         self.layers[row * self.columns + col]
     }
 
-    /// The largest budget in the grid — how big a solver workspace has to be.
+    /// The largest budget in the grid — how big a solver workspace must be.
     pub fn max(&self) -> usize {
         self.layers.iter().copied().max().unwrap_or(0)
     }
@@ -73,7 +59,7 @@ pub fn layer_grid(source: &PlanarU8, layout: &Layout, range: (usize, usize)) -> 
     }
 
     // A wall of uniformly busy cells (or a single cell) has nothing to spread,
-    // so everything lands on the low end of the range — as in the old build.
+    // so everything lands on the low end of the range.
     let span = (range.1 - range.0) as f32;
     let inv = if hi > lo { 1.0 / (hi - lo) } else { 0.0 };
     let layers = variances
@@ -93,8 +79,8 @@ pub fn layer_grid(source: &PlanarU8, layout: &Layout, range: (usize, usize)) -> 
 /// Sum of the per-channel variances of the source pixels behind one cell.
 fn cell_variance(source: &PlanarU8, layout: &Layout, row: usize, col: usize) -> f32 {
     let (x0, x1) = (offset_column(col), offset_column(col) + BANNER_W);
-    // The cell's *solved* rows: the whole banner for row 0, the visible bottom
-    // 24 rows below it — the same split the solver uses.
+    // The cell's *solved* rows: the whole banner for row 0, only the visible
+    // bottom rows below it — the same split the solver uses.
     let (y0, y1) = if row == 0 {
         (PAD_TOP, PAD_TOP + BANNER_H)
     } else {

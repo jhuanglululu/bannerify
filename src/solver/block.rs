@@ -1,28 +1,4 @@
 //! Background block matching: which block sits behind the banners of one cell.
-//!
-//! This runs **inside the column work item**, between resampling the column's
-//! band and solving its banner cells (`context/designs/pipeline.md` stage 5).
-//! It has to: the score is over the pixels of a block cell that *no banner
-//! covers*, and a block column is the only cut of the wall that owns complete
-//! block cells — which is the whole reason items are columns and never rows.
-//!
-//! One cell, one argmin:
-//!
-//! 1. gather the block cell's exposed pixels out of the column's resampled band
-//!    — the frame's index list, [`crate::block`], picks them;
-//! 2. convert that gather to OKLab, with the same function that converted the
-//!    block textures at load;
-//! 3. score every block by Euclidean OKLab distance over those pixels and keep
-//!    the smallest.
-//!
-//! No closed form and no shortlist: unlike the banner solver there is nothing
-//! to expand — a block is a fixed texture, not a colour laid through a mask, so
-//! the distance is just a difference of two known vectors. The cost is
-//! `blocks × frame pixels × 3`, and the frame is 96 pixels on every interior
-//! row, which is where almost all the cells are.
-//!
-//! Ties go to the lower index, i.e. to the alphabetically earlier block id —
-//! deterministic, and independent of how the wall was cut into items.
 
 use crate::block::{
     BOTTOM_FRAME, Blocks, FRAME_EDGE, FRAME_MID, Frame, FramePlanes, MIDDLE_FRAME, TOP_FRAME,
@@ -37,8 +13,7 @@ use super::cell::BandView;
 /// Channels the match is scored over.
 const CHANNELS: usize = 3;
 
-/// Reusable gather buffers, one per work item — the block matcher's half of the
-/// "nothing allocates inside the cell loop" rule the solver workspace follows.
+/// Reusable gather buffers, one per work item.
 pub struct BlockScratch {
     edge: FramePlanes<FRAME_EDGE>,
     mid: FramePlanes<FRAME_MID>,
@@ -51,7 +26,6 @@ impl Default for BlockScratch {
 }
 
 impl BlockScratch {
-    /// Allocate the two frame sizes.
     pub fn new() -> Self {
         Self {
             edge: [Chunk::zeroed(); CHANNELS],
@@ -60,10 +34,8 @@ impl BlockScratch {
     }
 }
 
-/// Match block cell `(row, col)` of a wall `block_rows` blocks tall.
-///
-/// `view` is the column item's own band, addressed in wall coordinates; `row`
-/// is a **block** row, not a banner row.
+/// Match block cell `(row, col)` of a wall `block_rows` blocks tall. `row` is a
+/// **block** row, not a banner row.
 pub fn match_cell(
     view: &BandView<'_>,
     scratch: &mut BlockScratch,
@@ -88,7 +60,6 @@ pub fn match_cell(
     }
 }
 
-/// Gather the frame's pixels of block cell `(row, col)` and convert to OKLab.
 fn gather<const N: usize>(
     view: &BandView<'_>,
     row: usize,
@@ -106,7 +77,8 @@ fn gather<const N: usize>(
     to_oklab(out);
 }
 
-/// The block whose frame is closest to `target` in OKLab.
+/// The block whose frame is closest to `target` in OKLab; ties go to the lower
+/// index, so the result does not depend on how the wall was cut into items.
 fn argmin<const N: usize>(target: &FramePlanes<N>, blocks: &[FramePlanes<N>]) -> usize {
     let mut best = 0;
     let mut min = f32::INFINITY;

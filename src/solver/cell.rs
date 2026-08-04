@@ -1,36 +1,13 @@
 //! Cell I/O: gathering a cell's target patch out of a column band, and painting
 //! the solved composite back into the column's preview strip.
 //!
-//! ## Patch geometry
-//!
-//! Ported from the old build's `image/split.rs`. A banner is [`BANNER_W`] wide
-//! and sits [`PAD_SIDE`] pixels inside its 24-pixel block column, so the patch
-//! is the 20-wide window at [`offset_column`] — the two pixels either side stay
-//! background, which is why the preview shows gaps between banners. **A banner
-//! never crosses a block-column boundary**, which is what makes the column a
-//! self-contained work item (`context/designs/pipeline.md`).
-//!
-//! Vertically, banner row `r` hangs at wall rows `r·24+4 .. r·24+44`, so it
-//! touches block rows `r` and `r+1` — every banner bridges a horizontal block
-//! seam, and the banner above draws over the one below:
-//!
-//! - Banner row 0 has nothing in front of it: the patch is all 40 rows,
-//!   starting at wall row [`PAD_TOP`].
-//! - Banner row `r ≥ 1` is hidden on its local rows `0..16` by row `r−1`'s
-//!   bottom, and is visible only on its bottom [`VISIBLE_H`] rows — local
-//!   `16..40`, i.e. wall rows [`offset_row`]`(r) .. + VISIBLE_H`.
-//!
-//! ## Overlap, resolved by extraction
-//!
-//! Because a lower banner's patch *is* only its visible rows (the tail of the
-//! full patch, elements `TOP_HW - NTOP_HW ..`), the visible regions of
-//! successive banner rows are disjoint and tile the column: row 0 paints wall
-//! rows `4..44`, row 1 paints `44..68`, and so on. Painting them top to bottom
-//! therefore produces exactly the pixels that compositing lower-first and
-//! drawing the upper banner over it would — the occlusion is already baked into
-//! which rows each cell owns, so there is nothing left to overdraw. All of it is
-//! internal to one column item: no other item reads or writes these bytes, so
-//! the result does not depend on scheduling.
+//! Banner row `r` hangs at wall rows `r·24+4 .. r·24+44`, so every banner
+//! bridges a horizontal block seam and the row above draws over it. Row 0 owns
+//! its full 40 rows; row `r ≥ 1` owns only its bottom [`VISIBLE_H`] rows, the
+//! tail of a full patch. The owned regions are therefore disjoint and tile the
+//! column, so painting rows in any order gives the same pixels as compositing
+//! lower-first and drawing the upper banner over it — the occlusion is baked
+//! into which rows each cell owns, and nothing needs overdrawing.
 
 use crate::block::TEXTURE_BYTES;
 use crate::geometry::{
@@ -48,10 +25,6 @@ pub const STRIP_PITCH: usize = BLOCK_SIDE * CHANNELS;
 
 /// Wall rows of banner row `row`'s patch, its height in rows, and the element
 /// offset at which it starts inside a [`Plane`].
-///
-/// Row 0 solves the full patch; the rest solve only what shows, which is the
-/// *tail* of a plane — the same split the workspace's lane views use
-/// ([`crate::solver::workspace`]).
 #[inline]
 pub fn patch_rows(row: usize) -> (usize, usize, usize) {
     if row == 0 {
@@ -81,7 +54,6 @@ pub struct BandView<'a> {
 impl<'a> BandView<'a> {
     /// Wrap `band`, whose top-left sample is wall pixel `(x, y)`.
     pub fn new(band: Option<&'a ColBand>, x: usize, y: usize, fallback: [u8; CHANNELS]) -> Self {
-        debug_assert!(band.is_none_or(|b| b.channels() == CHANNELS));
         Self {
             band,
             x,
@@ -95,8 +67,7 @@ impl<'a> BandView<'a> {
     }
 
     /// One wall pixel of one channel, or the pad colour where the band does not
-    /// reach. The block matcher gathers scattered pixels rather than runs, so
-    /// it addresses the band one sample at a time.
+    /// reach.
     #[inline]
     pub fn pixel(&self, y: usize, x: usize, ch: usize) -> f32 {
         let Some(band) = self.band else {
@@ -112,11 +83,10 @@ impl<'a> BandView<'a> {
     }
 
     /// Gather the patch of banner cell `(row, col)` into `target`, planar and
-    /// row-major — the layout [`crate::pattern`] documents, so target planes and
-    /// pattern planes zip lane for lane.
+    /// row-major, so target planes and pattern planes zip lane for lane.
     ///
-    /// Only the row's active view of each plane is written: rows below the top
-    /// fill elements `TOP_HW - NTOP_HW ..`, leaving the head untouched.
+    /// Only the row's active view of each plane is written, leaving the head of
+    /// a lower row's planes untouched.
     pub fn gather(&self, row: usize, col: usize, target: &mut [Plane; CHANNELS]) {
         let (y0, rows, base) = patch_rows(row);
         let x0 = offset_column(col);
@@ -146,10 +116,7 @@ impl<'a> BandView<'a> {
 /// Paint one matched block's texture into its column strip.
 ///
 /// The strip is [`BLOCK_SIDE`] pixels wide and starts at wall row 0, so block
-/// row `row` owns exactly strip rows `row·24 .. row·24+24` — one contiguous
-/// [`TEXTURE_BYTES`] run, which is why this is a single `copy_from_slice`.
-/// Banners are painted over it afterwards, so what stays visible is precisely
-/// the hollow frame the matcher scored ([`crate::block`]).
+/// row `row` owns exactly one contiguous [`TEXTURE_BYTES`] run of it.
 pub fn paint_block(strip: &mut [u8], row: usize, texture: &[u8; TEXTURE_BYTES]) {
     let start = row * BLOCK_SIDE * STRIP_PITCH;
     strip[start..start + TEXTURE_BYTES].copy_from_slice(texture);
@@ -160,9 +127,8 @@ const _: () = assert!(BLOCK_PIXELS == BLOCK_SIDE * BLOCK_SIDE);
 
 /// Paint one solved cell's composite into its column strip.
 ///
-/// `composite` is the solver's final prefix, in the same patch layout as the
-/// target. Values can sit slightly outside `0..255` (nothing in the compositing
-/// algebra clamps, and lanczos overshoot rides in through the target), so the
+/// Values can sit slightly outside `0..255` — nothing in the compositing
+/// algebra clamps, and lanczos overshoot rides in through the target — so the
 /// clamp happens here, at the byte edge.
 pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
     let (y0, rows, base) = patch_rows(row);
@@ -179,14 +145,11 @@ pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
     }
 }
 
-/// Sample → display byte, clamped and rounded.
 #[inline]
 fn to_u8(v: f32) -> u8 {
     v.clamp(0.0, 255.0).round() as u8
 }
 
-// The layout claims above, checked where they are cheapest to check: a banner
-// shows `VISIBLE_H` rows and hides `HIDDEN_H` behind the banner above it, and
-// sits `PAD_SIDE` in from each edge of its block column.
+// Layout invariants the slicing above relies on.
 const _: () = assert!(BANNER_H == HIDDEN_H + VISIBLE_H);
 const _: () = assert!(BANNER_W + 2 * PAD_SIDE == BLOCK_SIDE);

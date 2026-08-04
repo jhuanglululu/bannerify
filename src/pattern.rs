@@ -6,27 +6,12 @@
 //! through, so a pattern contributes `α` of its dye and `1 − α` of whatever is
 //! already composited underneath. The RGB channels of the assets are ignored.
 //!
-//! ## Layout
-//!
-//! A patch — target, prefix composite or pattern mask — is **row-major,
-//! [`BANNER_W`] wide by 40 (or 24) rows tall**, one plane per quantity, i.e.
-//! `index = y * BANNER_W + x`. That is exactly the order the PNG's rows arrive
-//! in and exactly the order [`crate::solver::cell`] gathers target pixels in,
-//! so a pattern plane and a target plane can be zipped lane for lane with no
-//! addressing arithmetic anywhere in the kernels.
-//!
-//! **One plane per pattern, two `Σ α²` tables.** A banner's top [`HIDDEN_H`]
-//! rows are covered by the banner hanging in front of it, so rows below the
-//! first solve only their bottom 24 rows — which, the layout being row-major,
-//! are exactly the *tail* of the full plane. Stage 2a stored that tail as a
-//! second `Chunk<NTOP_HW>` per pattern; stage 2b drops it and lets the solver
-//! take the lane-aligned tail view of the full plane instead
-//! ([`crate::solver::workspace`]), the same merge the workspace itself got.
-//!
-//! What does differ between the variants is `Σ α²` — the `c²` coefficient of
-//! the closed-form dye sweep, which sums over exactly the solved pixels — so
-//! that stays two tables, [`Patterns::top_alpha2`] and
-//! [`Patterns::lower_alpha2`].
+//! A patch is row-major, [`BANNER_W`] wide by 40 (or 24) rows tall, one plane
+//! per quantity, so a pattern plane and a target plane can be zipped lane for
+//! lane with no addressing arithmetic in the kernels. A banner's top rows are
+//! covered by the banner in front of it, so lower rows solve the lane-aligned
+//! *tail* of the same plane — only `Σ α²`, which sums over exactly the solved
+//! pixels, differs between the two cases and so is stored twice.
 
 use std::collections::HashSet;
 
@@ -34,11 +19,10 @@ use image::GenericImageView;
 use rayon::prelude::*;
 use rust_embed::Embed;
 
-use crate::geometry::{BANNER_H, BANNER_W, HIDDEN_H, NTOP_HW, TOP_HW};
+use crate::geometry::{BANNER_H, BANNER_W, NTOP_HW, TOP_HW};
 use crate::logger::error_out;
 use crate::simd::Chunk;
 
-/// The embedded `assets/banners/` tree.
 #[derive(Embed)]
 #[folder = "assets/banners/"]
 struct PatternAssets;
@@ -59,12 +43,10 @@ pub struct Patterns {
 }
 
 impl Patterns {
-    /// Number of patterns in the table.
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
-    /// Whether the table is empty (only reachable by excluding everything).
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -72,9 +54,8 @@ impl Patterns {
 
 /// Decode the embedded patterns, dropping every id in `exclude`.
 ///
-/// Decoding is `par_iter` over patterns like the old build — 42 tiny PNGs, but
-/// it is free parallelism on the startup path. An id in `exclude` that names no
-/// pattern is a user mistake, not a silent no-op: it exits with the list.
+/// An id in `exclude` that names no pattern is a user mistake, not a silent
+/// no-op: it exits with the list.
 pub fn load(exclude: &HashSet<String>) -> Patterns {
     // rust-embed's iteration order follows the directory walk; sort so the
     // pattern indices (and therefore every tie-break in the solver) are the
@@ -116,7 +97,6 @@ pub fn load(exclude: &HashSet<String>) -> Patterns {
     }
 }
 
-/// Decode one embedded PNG into a full-patch alpha plane.
 fn decode(id: &str) -> Chunk<TOP_HW> {
     let file = PatternAssets::get(&format!("{id}.png"))
         .unwrap_or_else(|| error_out!("internal error: pattern '{id}' vanished from the binary"));
@@ -138,12 +118,6 @@ fn decode(id: &str) -> Chunk<TOP_HW> {
     out
 }
 
-/// `Σ α²` over a patch. Cold path (once per pattern at startup) — plain scalar.
 fn sum_squares(patch: &[f32]) -> f32 {
     patch.iter().map(|a| a * a).sum()
 }
-
-/// Rows of a patch that are hidden behind the banner in front of it — the part
-/// [`Patterns::lower`] drops. Kept as a named constant so the `top`/`lower`
-/// split reads the same here as in the geometry module.
-const _: () = assert!(TOP_HW - NTOP_HW == HIDDEN_H * BANNER_W);

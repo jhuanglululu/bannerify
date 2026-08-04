@@ -9,12 +9,8 @@ use super::{F32s, LANES};
 /// Alignment of every [`AlignedVec`] allocation, in bytes.
 const ALIGN: usize = 64;
 
-/// Runtime-length 64-byte-aligned `f32` buffer.
-///
-/// The length is asserted to be a multiple of 16 at construction, so lane views
-/// never need a remainder path. Nothing here touches memory implicitly: only
-/// the constructor you name writes to the buffer, and [`AlignedVec::new_uninit`]
-/// writes nothing at all.
+/// Runtime-length 64-byte-aligned `f32` buffer. The length is asserted to be a
+/// multiple of 16 at construction, so lane views never need a remainder path.
 pub struct AlignedVec {
     /// Dangling (but 64-byte aligned) when `len == 0`.
     ptr: NonNull<f32>,
@@ -36,10 +32,8 @@ impl AlignedVec {
         Layout::from_size_align(len * size_of::<f32>(), ALIGN).expect("AlignedVec: layout overflow")
     }
 
-    /// `len` elements, all zero.
-    ///
-    /// Uses `alloc_zeroed`, so for large buffers the zeroing is the allocator's
-    /// (typically fresh zero pages), not an explicit memset.
+    /// `len` elements, all zero. Uses `alloc_zeroed`, so for large buffers the
+    /// zeroing is the allocator's (fresh zero pages), not an explicit memset.
     pub fn zeroed(len: usize) -> Self {
         let layout = Self::layout(len);
         if len == 0 {
@@ -53,9 +47,8 @@ impl AlignedVec {
         }
     }
 
-    /// `len` elements, **contents unspecified** — nothing is written at
-    /// allocation time (no memset), which is the point: this is the write-once
-    /// output buffer constructor.
+    /// `len` elements, contents unspecified — nothing is written at allocation
+    /// time.
     ///
     /// # Safety
     ///
@@ -76,8 +69,7 @@ impl AlignedVec {
         }
     }
 
-    /// `len` elements, each lane produced by `f` — a safe write-once
-    /// constructor: allocates uninitialized and writes every lane exactly once.
+    /// `len` elements, each lane produced by `f`.
     pub fn from_lane_fn(len: usize, mut f: impl FnMut(usize) -> F32s) -> Self {
         // SAFETY: every lane — and therefore every element — is written below
         // before this function returns, so no unwritten element is observable.
@@ -91,7 +83,6 @@ impl AlignedVec {
         v
     }
 
-    /// `len` elements, all `x`.
     pub fn splat(len: usize, x: f32) -> Self {
         let v = F32s::splat(x);
         Self::from_lane_fn(len, |_| v)
@@ -112,13 +103,11 @@ impl AlignedVec {
         self.len
     }
 
-    /// Whether the buffer has no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Overwrite every element with `x`.
     #[inline]
     pub fn fill(&mut self, x: f32) {
         let v = F32s::splat(x);

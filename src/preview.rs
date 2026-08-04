@@ -1,53 +1,20 @@
 //! The two images the HTML's compare slider shows, both produced by this
-//! crate's own resampler.
-//!
-//! - the **generated** pane: the rendered wall canvas, downscaled;
-//! - the **original** pane: the source image, resampled through the very same
-//!   source window the wall was built from ([`crate::layout::Layout::window`]),
-//!   so the two panes frame the same picture and the slider lines up.
-//!
-//! Both go to the same pixel size, which is what makes them stackable panes
-//! rather than two images that need CSS to agree.
-//!
-//! ## Nothing wall-sized in `f32`
-//!
-//! The wall canvas is interleaved `u8` and stays that way: it is read *in
-//! place* through [`InterleavedU8`], which strides the u8 → f32 widening the
-//! H pass already does at load ([`crate::resample`]). No planar copy of the
-//! wall is ever materialised.
-//!
-//! Downscaling is parallel over **column bands**, the same work item shape as
-//! the wall pipeline: each band resamples its own output columns and converts
-//! them to bytes locally, and one interleave pass assembles the image. So the
-//! only `f32` buffers alive at once are the in-flight bands
-//! (`height × band width`), never the whole preview.
+//! crate's own resampler: the rendered wall canvas downscaled, and the source
+//! image resampled through the same source window the wall was built from.
 
 use rayon::prelude::*;
 
 use crate::geometry::BLOCK_SIDE;
 use crate::resample::{Plan, Source, Window};
 
-/// Channels the preview images carry.
 const CHANNELS: usize = 3;
 
 /// Output columns one downscale work item owns.
-///
-/// One block wide, like the wall pipeline's items — the number that made the
-/// column split natural there is just as good here, and it keeps a band's
-/// working set at a few tens of kilobytes.
 const BAND: usize = BLOCK_SIDE;
 
-/// Resample `src`'s region `window` to `width × height`, interleaved RGB.
-///
-/// Parallel over column bands; the returned buffer is exactly what an encoder
-/// wants, so nothing is converted again downstream.
 pub fn resize<S: Source + ?Sized>(src: &S, window: Window, width: usize, height: usize) -> Vec<u8> {
-    debug_assert_eq!(src.channels(), CHANNELS);
     let plan = Plan::with_window(src.width(), src.height(), window, width, height);
 
-    // One item = one band of output columns, resampled and byte-converted
-    // locally. The strips together *are* the output, so the assembly below is
-    // the only copy.
     let strips: Vec<Vec<u8>> = (0..width.div_ceil(BAND))
         .into_par_iter()
         .map(|b| {
@@ -82,18 +49,12 @@ pub fn resize<S: Source + ?Sized>(src: &S, window: Window, width: usize, height:
     out
 }
 
-/// The preview's pixel size.
-///
-/// Default (`max_dim` is `None`): the **source image's own dimensions** — the
-/// picture comes back the size it went in. `--preview N` overrides that with a
-/// max-dimension: the larger side becomes `N` and the other follows the wall's
-/// aspect ratio.
+/// The preview's pixel size: the source's own dimensions by default, else the
+/// wall's aspect ratio scaled so its larger side is `max_dim`.
 ///
 /// Either way the result is clamped to the wall canvas: upscaling a banner wall
-/// for an HTML preview would only spend megabytes of base64 on interpolation of
-/// pixels the solver never had. (The wall's aspect ratio is within one block of
-/// the source's by construction — [`crate::geometry::infer_dimension`] picks
-/// the grid that least distorts it — so the default is not a stretch.)
+/// would only spend megabytes of base64 on interpolation of pixels the solver
+/// never had.
 pub fn dimensions(
     max_dim: Option<usize>,
     source: (usize, usize),

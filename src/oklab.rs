@@ -8,11 +8,10 @@
 //! OKLab instead ([`crate::solver::refine`]). This module is that conversion —
 //! also used by the background block matcher ([`crate::block`]).
 //!
-//! OKLab (Björn Ottosson, 2020) replaces the Python build's CIELAB + CIEDE2000:
-//! plain Euclidean distance in OKLab is already about as good a perceptual
-//! metric as CIEDE2000, and it is a matrix, a cube root and another matrix —
-//! no hue angles, no `atan2`, no branch-per-term correction terms. That
-//! decision is recorded in `context/plans/2-solver.md`.
+//! OKLab (Björn Ottosson, 2020) was chosen because plain Euclidean distance in
+//! it is about as good a perceptual metric as CIEDE2000, while being a matrix,
+//! a cube root and another matrix — no hue angles, no `atan2`, no
+//! branch-per-term correction terms.
 //!
 //! ## The pipeline
 //!
@@ -28,10 +27,8 @@
 //! - **Linearisation** is a 256-entry table lookup, i.e. a gather; NEON has
 //!   none. Using a table means the input is quantised to integer sRGB — which
 //!   is not a loss: the banner is *rendered* as bytes, so the colour the table
-//!   scores is exactly the colour the viewer will see. Unlike the old build's
-//!   table ([`../bannerify-old/src/lab.rs`], which approximated `x^2.4` by
-//!   `x²·(A·x + B)`, up to 5.3e-3 absolute error in linear light), this table is
-//!   built by Newton iteration in `const` context and is exact to f32.
+//!   scores is exactly the colour the viewer will see. The table is built by
+//!   Newton iteration in `const` context and is exact to f32.
 //! - **Cube root** is `f32::cbrt` per lane, i.e. correctly rounded libm rather
 //!   than a vector Newton iteration off a bit-hack seed. The linearisation LUT
 //!   above already forces a lane round-trip inside the same function, so a
@@ -39,11 +36,10 @@
 //!   libm is what makes the NEON and scalar backends produce *bit-identical*
 //!   OKLab values.
 //!
-//!   Since phase 5 this is the solver's hot loop — refinement converts a whole
-//!   patch per exact candidate — and the cube roots are indeed where the time
-//!   goes. It is left alone deliberately (`context/plans/5-exact-refine.md`):
-//!   an approximate cube root would trade the one thing this module currently
-//!   guarantees, cross-backend identity, for a speedup that
+//!   This is the solver's hot loop — refinement converts a whole patch per
+//!   exact candidate — and the cube roots are where the time goes. It is left
+//!   alone deliberately: an approximate cube root would trade the one thing
+//!   this module guarantees, cross-backend identity, for a speedup that
 //!   `--exact-candidates` already exposes as a dial.
 //!
 //! Everything between them — both matrices — is `F32s` arithmetic. There is no
@@ -57,8 +53,8 @@ use crate::simd::F32s;
 ///
 /// The exact sRGB EOTF: `c/12.92` below the knee, `((c+0.055)/1.055)^2.4`
 /// above. `powf` is not `const`, so the upper branch is evaluated as
-/// `x^2.4 = (x^12)^(1/5)` by Newton iteration on `y⁵ − x¹² = 0`, seeded with
-/// the old build's cubic approximation and run to convergence in `f64`.
+/// `x^2.4 = (x^12)^(1/5)` by Newton iteration on `y⁵ − x¹² = 0`, run to
+/// convergence in `f64`.
 const LINEARIZE: [f32; 256] = {
     let mut out = [0.0_f32; 256];
     let mut i = 0;
@@ -81,12 +77,12 @@ const fn pow_2_4(x: f64) -> f64 {
     let x4 = x2 * x2;
     let t = x4 * x4 * x4;
 
-    // Seed: the cubic approximation the old build shipped as its final answer.
+    // Seed: a cubic approximation of x^2.4, within ~35% relative error.
     const A: f64 = 0.4618055522441864;
     let mut y = x2 * (A * x + (1.0 - A));
 
-    // Newton on y^5 - t: y -= (y^5 - t) / (5 y^4). Quadratic convergence from a
-    // seed within ~35% relative error; 20 steps is far past f64 convergence.
+    // Newton on y^5 - t: y -= (y^5 - t) / (5 y^4). Quadratic convergence, so
+    // 20 steps is far past f64 convergence.
     let mut step = 0;
     while step < 20 {
         let y2 = y * y;
@@ -133,7 +129,6 @@ pub fn srgb_to_oklab(r: F32s, g: F32s, b: F32s) -> (F32s, F32s, F32s) {
     )
 }
 
-/// One row of a 3×3 colour matrix applied to a lane triple.
 #[inline]
 fn matrix_row(row: [f64; 3], x: F32s, y: F32s, z: F32s) -> F32s {
     x.mul_add(

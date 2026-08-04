@@ -5,18 +5,12 @@ use super::aligned::AlignedVec;
 use super::chunk::Chunk;
 
 /// Anything that can be viewed as a shared slice of lanes.
-///
-/// Implemented for [`Chunk<N>`], [`AlignedVec`] and `[F32s]`; `zip!` calls
-/// these with method syntax, so references (`&Chunk`, `&mut AlignedVec`,
-/// `&[F32s]`, ...) work through auto-deref.
 pub trait LaneSrc {
-    /// Borrow the source as a lane slice.
     fn lanes_ref(&self) -> &[F32s];
 }
 
 /// Anything that can be viewed as an exclusive slice of lanes.
 pub trait LaneSrcMut {
-    /// Borrow the source as an exclusive lane slice.
     fn lanes_mut_ref(&mut self) -> &mut [F32s];
 }
 
@@ -65,13 +59,7 @@ impl LaneSrcMut for [F32s] {
 /// Zip 1–6 lane-view sources into one iterator of flat tuples.
 ///
 /// Read streams yield [`F32s`](crate::simd::F32s) by value; streams written
-/// `mut expr` yield `&mut F32s`. Sources are anything implementing
-/// [`LaneSrc`](crate::simd::LaneSrc) / [`LaneSrcMut`](crate::simd::LaneSrcMut):
-/// `&Chunk<N>`, `&mut Chunk<N>`, `&AlignedVec`, `&mut AlignedVec`, `&[F32s]`,
-/// `&mut [F32s]`. Lengths must match (checked with `debug_assert_eq!`).
-///
-/// Splitting borrows for multiple `mut` streams is the caller's job
-/// (`split_at_mut`).
+/// `mut expr` yield `&mut F32s`.
 ///
 /// ```
 /// use bannerify::simd::{Chunk, F32s};
@@ -87,7 +75,6 @@ impl LaneSrcMut for [F32s] {
 /// ```
 #[macro_export]
 macro_rules! zip {
-    // --- one source -> a lane iterator ---------------------------------
     // Method syntax (not UFCS) so auto-ref/auto-deref accepts owned buffers,
     // `&`/`&mut` references and slices alike; the trait import is block-local.
     (@src mut $e:expr) => {{

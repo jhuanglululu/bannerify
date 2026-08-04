@@ -1,13 +1,8 @@
 //! Merging CLI flags with the TOML config file, and validating the result.
 //!
-//! Ported from `../bannerify-old/src/cli/config.rs`. CLI values always win over
-//! file values. Validation failures print one friendly coloured line and exit
-//! (see [`error_out!`](crate::logger::error_out)) rather than surfacing a clap
-//! panic or a raw parse error.
-//!
-//! Adapted from the old build: `toml::from_slice` no longer exists in the
-//! current `toml` crate, so the file is read as a string and parsed with
-//! `toml::from_str`.
+//! CLI values always win over file values. Validation failures print one
+//! friendly coloured line and exit (see
+//! [`error_out!`](crate::logger::error_out)).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -19,60 +14,38 @@ use serde::Deserialize;
 use crate::cli::Args;
 use crate::logger::error_out;
 
-/// Default `--exact-candidates`.
-///
-/// Chosen by the phase-5 N sweep (`tmp/p5/sweep-summary.txt`): `20` is the
-/// smallest N whose mean ΔE is within 0.5% of `N = 40` on **all four**
-/// benchmark cases (both images × `--row 20` / `--row 100`), and `40` itself
-/// buys another 0.2% for 60% more wall time. `8` is the knee of the curve if
-/// speed matters more than the last 1%.
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
 
 /// The validated, merged configuration the pipeline runs on.
-///
-/// Every field is live as of phase 3.
 pub struct Config {
-    /// Input image path (checked to exist).
     pub input: PathBuf,
-    /// Output path.
     pub output: PathBuf,
-    /// Requested wall size.
     pub dimension: Dimension,
-    /// Rayon worker cap, if any.
     pub workers: Option<usize>,
-    /// How the image maps onto the wall.
     pub resizing_method: ResizingMethod,
-    /// Print per-stage timings and memory (logs only, no extra files).
     pub debug: bool,
-    /// Patterns the solver may not use.
     pub exclude_patterns: HashSet<String>,
-    /// Blocks the background matcher may not use.
     pub exclude_blocks: HashSet<String>,
     /// Largest dimension of the embedded preview images, or `None` for the
     /// input image's own size. Clamped to the wall either way
     /// ([`crate::preview::dimensions`]).
     pub preview: Option<usize>,
-    /// Where to write the full-resolution wall render, if anywhere.
     pub render: Option<PathBuf>,
     /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
-    /// Windowed beam refinement settings.
     pub refinement: RefinementConfig,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
-    /// Perturbation RNG seed; irrelevant unless `perturbations` is set.
     pub seed: u64,
 }
 
 /// Windowed beam refinement settings.
 pub struct RefinementConfig {
-    /// Number of refinement passes.
     pub refinement_pass: usize,
     /// Layers adjusted at once.
     pub window_size: usize,
     /// Candidate survival threshold, `0.0..=1.0`.
     pub error_threshold: f32,
-    /// Maximum surviving candidates.
     pub refinement_candidate: usize,
     /// Candidates per window step re-scored exactly in OKLab; `0` disables the
     /// exact rung and leaves refinement on the closed-form sRGB error.
@@ -165,7 +138,6 @@ impl From<Args> for Config {
     }
 }
 
-/// Read and parse the config file, if one was given.
 fn load_config(path: Option<&std::path::Path>) -> (ConfigToml, String) {
     let Some(path) = path else {
         return (ConfigToml::default(), String::new());
@@ -444,7 +416,6 @@ fn parse_perturbation(
     }
 }
 
-/// Accepted colour spellings, for error messages.
 fn valid_color_str() -> String {
     format!(
         "\n       valid color format includes: '{}', '{}' and '{}'",

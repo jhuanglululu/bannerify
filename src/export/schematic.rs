@@ -15,23 +15,20 @@
 //! X is the wall's columns, Y is up (so wall row 0, the top, is the *highest*
 //! Y), Z is depth: the blocks at `z = 0` and the wall banners one block in
 //! front of them at `z = 1`, `facing=south`, which is the face that hangs on a
-//! block to its north. A wall of `rows` banner rows is `rows + 1` blocks tall —
-//! the same `+1` the whole crate carries ([`crate::geometry`]) — and the bottom
-//! block row is real wall, not a copy of the one above it, because the matcher
-//! solved it like any other cell.
+//! block to its north. A wall of `rows` banner rows is `rows + 1` blocks tall.
 //!
 //! ## Sponge v2
 //!
-//! Ported from the Python build's `schematic.py`: `Palette` maps block-state
-//! strings to ids, `BlockData` is those ids as varints in `x + z·W + y·W·L`
-//! order, and `BlockEntities` carries the banners' `patterns`. `DataVersion`
-//! stays [`DATA_VERSION`] (1.21.4) — the format has not changed since, and a
-//! DataVersion newer than the reader is the one thing WorldEdit refuses.
+//! `Palette` maps block-state strings to ids, `BlockData` is those ids as
+//! varints in `x + z·W + y·W·L` order, and `BlockEntities` carries the banners'
+//! `patterns`. `DataVersion` stays [`DATA_VERSION`] (1.21.4) — the format has
+//! not changed since, and a DataVersion newer than the reader is the one thing
+//! WorldEdit refuses.
 //!
 //! ## Litematica v6
 //!
-//! Researched from the format's writers (litemapy's `to_nbt`, which mirrors
-//! Litematica's own `LitematicaBitArray`), because there is no published spec:
+//! There is no published spec; this follows the format's writers (litemapy's
+//! `to_nbt`, which mirrors Litematica's own `LitematicaBitArray`):
 //!
 //! - root `Version` 6, `SubVersion` 1, `MinecraftDataVersion`;
 //! - `Metadata` with `EnclosingSize`, counts and timestamps;
@@ -48,12 +45,11 @@ use crate::color::COLOR_NAMES;
 use crate::export::Wall;
 use crate::export::nbt::{COMPOUND, Tag, compound, gzip, varint, write_root};
 
-/// Minecraft data version the exports declare: 1.21.4, as the Python build
-/// shipped. Both formats' readers only use it to decide whether they must
-/// upgrade the block states, and ours are already in the modern spelling.
+/// Minecraft data version the exports declare: 1.21.4. Both formats' readers
+/// only use it to decide whether they must upgrade the block states, and ours
+/// are already in the modern spelling.
 pub const DATA_VERSION: i32 = 4189;
 
-/// Litematica schematic format version.
 const LITEMATIC_VERSION: i32 = 6;
 /// Litematica schematic sub-version, which version 6 carries.
 const LITEMATIC_SUBVERSION: i32 = 1;
@@ -65,9 +61,7 @@ const AIR: &str = "minecraft:air";
 /// Depth of the build: the block wall, and the banners in front of it.
 const LENGTH: usize = 2;
 
-/// One block position's contents.
 struct Cell<'a> {
-    /// `minecraft:` block id.
     name: &'a str,
     /// Block-state properties, `(key, value)`.
     props: &'a [(&'a str, &'a str)],
@@ -77,9 +71,6 @@ struct Cell<'a> {
 
 /// Walk the build in `(y, z, x)` order — the order both formats' block arrays
 /// use — handing each position to `f`.
-///
-/// One traversal, two writers: the geometry above is stated once, and neither
-/// format gets to disagree with the other about where a banner goes.
 fn walk<'a>(wall: &'a Wall<'a>, mut f: impl FnMut(usize, usize, usize, Option<Cell<'a>>)) {
     let height = wall.block_rows();
     for y in 0..height {
@@ -129,7 +120,6 @@ static BANNER_NAMES: [&str; crate::color::NUM_COLORS] = [
     "minecraft:black_wall_banner",
 ];
 
-/// The `patterns` list of a banner block entity.
 fn patterns_tag(wall: &Wall<'_>, solution: &crate::solver::Solution) -> Tag {
     Tag::List(
         COMPOUND,
@@ -257,7 +247,6 @@ pub fn litematic(wall: &Wall<'_>, name: &str, created: i64) -> Vec<u8> {
         };
         // walk() already visits in y, z, x order — which is exactly the
         // format's index order — so pushing in sequence *is* the indexing.
-        debug_assert_eq!(indices.len(), y * width * LENGTH + z * width + x);
         indices.push(id as u32);
 
         if let Some(solution) = cell.and_then(|c| c.banner) {

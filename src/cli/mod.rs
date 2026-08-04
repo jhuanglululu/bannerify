@@ -1,19 +1,4 @@
 //! Command-line surface — one command, no subcommands.
-//!
-//! Ported from `../bannerify-old/src/cli/mod.rs`; see
-//! `context/designs/cli.md`. Resizing is internal to the tool, never a user
-//! step, so there is no `resize` subcommand: the user names a wall size in
-//! banner rows or columns and the pipeline does the rest.
-//!
-//! Every option is live as of phase 3 — `--exclude-blocks` was the last inert
-//! one and the background matcher now honours it. Phase 5 removed
-//! `-l/--lab-refine`: exact OKLab scoring is not a final pass any more, it is a
-//! rung inside refinement, tuned by `-x/--exact-candidates`.
-//!
-//! `--debug` is logging only: per-stage timings and memory, no file dumping.
-//! The pipeline is complete, so `<OUTPUT>` is the finished HTML export; the
-//! full-resolution wall render is a separate opt-in file (`--render PATH`)
-//! rather than an intermediate the tool always drops beside the output.
 
 use std::path::PathBuf;
 

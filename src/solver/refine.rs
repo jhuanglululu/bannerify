@@ -2,9 +2,6 @@
 //! sliding window of layers at a time, scoring each candidate against the
 //! *whole* banner rather than the partial composite the greedy fill saw.
 //!
-//! Ported from `../bannerify-old/src/solver/{refine.rs,build.rs}` onto the
-//! [`simd`](crate::simd) facade.
-//!
 //! ## Why a suffix cache
 //!
 //! The greedy fill can only see the layers already laid: when it picks layer
@@ -36,15 +33,12 @@
 //! survivor carries its own suffix cache into the next step. Up to
 //! `refinement_pass` passes, stopping early when a pass changes nothing.
 //!
-//! ## The exact rung (`--exact-candidates N`, phase 5)
+//! ## The exact rung (`--exact-candidates N`)
 //!
 //! The closed form above minimises a *weighted sRGB SSE*, which is not what the
-//! eye measures. Phase 4 established that solving natively in OKLab does not
-//! help (`context/plans/4-oklab-native.md`): the win of the old `--lab-refine`
-//! pass came from *exactly* scoring a shortlist, and compositing has to happen
-//! in sRGB because that is what the game blends in.
-//!
-//! So each window step is two rungs:
+//! eye measures. Solving natively in OKLab does not help — compositing has to
+//! happen in sRGB because that is what the game blends in — but *exactly*
+//! scoring a shortlist does. So each window step is two rungs:
 //!
 //! 1. score the whole `patterns × 16 × candidates` grid with the closed form —
 //!    one pass over the patch per `(candidate, pattern)`, as before;
@@ -69,42 +63,14 @@
 //! *given* a pattern is a well-conditioned 1-D fit and it gets that essentially
 //! right; ranking whole patterns against each other is where the sRGB/OKLab
 //! mismatch shows, and that is exactly what the exact rung is for. A flat top-N
-//! therefore spends most of its budget on runner-up dyes of the same few
-//! patterns, which is the one axis it did not need to check. Measured on
-//! great_wave at `--row 20` (mean ΔE, lower better):
+//! spends most of its budget on runner-up dyes of the same few patterns, which
+//! is the one axis it did not need to check — measured, the per-pair shortlist
+//! at `N = 8` beats a flat one at `N = 40` for a fifth of the exact
+//! evaluations.
 //!
-//! ```text
-//!            N=8      N=20     N=40/42
-//! flat       0.0806   —        0.0801
-//! per-pair   0.0797   0.0787   0.0786
-//! ```
-//!
-//! The per-pair shortlist at `N=8` beats the flat one at `N=40` while doing a
-//! fifth of the exact evaluations. Its own ceiling — every pair scored exactly,
-//! `N ≥ candidates × patterns` — is 0.0786; scoring all `672` dyes too reaches
-//! 0.0764, at 13× the wall time. That last 0.002 is not worth it.
-//!
-//! ## Deviations from the old build
-//!
-//! 1. **The beam owns its suffix buffers.** The old code held
-//!    `Cow<SuffixPatternCache>` and cloned on write; here [`Beam`] preallocates
-//!    `refinement_candidate` suffixes per generation and the window seeds
-//!    generation 0 with one copy of `suffixes[start_layer+1]`. Same algebra, no
-//!    per-window allocation — a `Vec` header swap replaces the generation
-//!    flip.
-//! 2. **Candidates with infinite error are never selected.** With
-//!    `error_threshold == 0` the old code took all `refinement_candidate`
-//!    slots, including the `(∞, 0, 0, 0)` sentinels that survive when fewer
-//!    real candidates were scored. The count is clamped to the finite ones.
-//! 3. **The base dye is re-optimised** at the end of every pass, from
-//!    `suffixes[0]` (with `α ≡ 1`) — exactly, like everything else, since 16
-//!    candidates need no shortlist. The old Rust build left the greedy base
-//!    alone; Python's `_refine_batch` re-optimises it, and the plan makes
-//!    Python the parity target where the two disagree.
-//! 4. **The final composite is rebuilt.** The old build stopped its end-of-pass
-//!    prefix rebuild one layer short (it never needed `prefixes[n]`); here that
-//!    plane is the answer, so the chain is rebuilt in full and the reported
-//!    error is measured on it.
+//! The base dye is re-optimised at the end of every pass from `suffixes[0]`
+//! (with `α ≡ 1`), and the whole prefix chain is then rebuilt, so `prefixes[n]`
+//! is the composite the reported error is measured on.
 
 use crate::cli::config::RefinementConfig;
 use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
@@ -138,8 +104,7 @@ struct Ctx<'a> {
 }
 
 /// Insert `entry` into an ascending top-list of fixed length, dropping its
-/// current worst. A candidate no better than the worst costs one comparison,
-/// which is the common case across a 42 × 16 grid.
+/// current worst.
 ///
 /// Ties keep the earlier insertion first, so the surviving order does not
 /// depend on a sort's tie-breaking — one less thing that could differ between
@@ -170,8 +135,6 @@ pub(super) fn refine(
     alphas: &[Plane],
     n: usize,
 ) {
-    debug_assert_eq!(solution.layers.len(), n);
-
     let Workspace {
         off,
         target,
@@ -193,7 +156,6 @@ pub(super) fn refine(
         cfg,
     };
 
-    // One slot per exact candidate, refilled with sentinels each window step.
     // Rung 1 offers at most one entry per (beam candidate, pattern), so asking
     // for more slots than that only wastes memory.
     let n_exact = cfg
@@ -299,8 +261,7 @@ fn refine_window(
 
                 // Rung 1. With the exact rung off the closed form *is* the
                 // ranking; with it on, only this pattern's best dye is
-                // shortlisted — see the module docs for why the runners-up are
-                // not worth an exact evaluation.
+                // shortlisted.
                 let mut pattern_best = NO_CAND;
                 for (c_idx, c) in COLORS_F32.iter().enumerate() {
                     let err = W_PERCEPTUAL[0] * (res2_0 + res_2a_0 * c[0])
@@ -451,8 +412,7 @@ pub(super) fn moments_eff(
     (acc2.hsum(), 2.0 * acc_a.hsum(), acc_e.hsum())
 }
 
-/// `layer = suffix ∘ (lay `color` through `alpha`)`, ported from the old
-/// build's `build_suffix`.
+/// `layer = suffix ∘ (lay `color` through `alpha`)`.
 pub(super) fn build_suffix(
     layer: &mut Suffix,
     suffix: &Suffix,
@@ -484,8 +444,8 @@ pub(super) fn build_suffix(
 /// `suffix` applying every layer above it — the composite the exact rung scores.
 ///
 /// This is the *sRGB* composite, deliberately: the game blends dye colours in
-/// sRGB, so this is the pixel a player will actually see. Phase 4 measured what
-/// blending in OKLab instead costs (1-3% ΔE on anti-aliased pattern edges).
+/// sRGB, so this is the pixel a player will actually see. Blending in OKLab
+/// instead costs 1-3% ΔE on anti-aliased pattern edges.
 pub(super) fn composite(
     out: &mut [Plane; 3],
     prefix: &[Plane; 3],

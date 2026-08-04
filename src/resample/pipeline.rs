@@ -1,31 +1,12 @@
-//! Streamed lanczos-3, sliced by output **column** band.
+//! Streamed lanczos-3, sliced by output column band: sources, the shared
+//! [`Plan`], per-band [`ColumnPlan`]/[`ColBand`], and the H and V passes.
 //!
-//! The unit of work is a band of output columns ([`ColumnPlan`]), resampled by
-//! its owner into a closure-local [`ColBand`] — that is the pipeline's parallel
-//! work item (one block column; see `context/designs/pipeline.md`), so this
-//! module hands out no parallelism of its own and orchestrates nothing.
-//!
-//! Inside a band: a ring of `ksize_y` horizontally-resampled rows is filled by
-//! the H pass (ring indexing — rows are never shifted or copied), and each
-//! output row is a `ksize_y`-tap weighted sum of the ring straight into the band
-//! buffer. Nothing wall-sized is ever materialised here; a band's working set is
-//! `(ksize_y + dst_height) * padded_band_width * 4` bytes per channel, plus one
-//! source-row scratch.
-//!
-//! ## Which table is shared
-//!
-//! A weight table costs one lanczos evaluation per output coordinate per tap,
-//! and every band on an axis wants the same coefficients — so the axis that is
-//! **not** cut belongs in the shared [`Plan`]. With column items that is the
-//! vertical axis: [`Plan`] holds the full-height [`VWeights`], and each column
-//! item builds the small [`HWeights`] for its own handful of output columns
-//! inside the closure (parallel, and proportional to the band, not the wall).
-//! This is the mirror image of the banner-row split this module used to have.
-//!
+//! Because the column axis is the one being cut, the shared [`Plan`] holds the
+//! full-height [`VWeights`] and each band builds its own small [`HWeights`].
 //! Sub-window weights are exact, not approximate: the coefficient for output
 //! `j` of a band starting at output `c` is centred at
 //! `x0 + (c + j + 0.5) * scale`, which is what the whole-image table would put
-//! at output `c + j`. Banding is invisible in the result on either axis.
+//! at output `c + j`, so banding is invisible in the result.
 
 use std::ops::Range;
 
@@ -36,19 +17,14 @@ use crate::zip;
 /// What the H pass can read from: an image the band asks for one span of one
 /// row of one channel at a time.
 ///
-/// Two implementations, and the difference between them is *where the u8 → f32
-/// widening reads from*, never an extra buffer: [`PlanarU8`] (the decoded source
-/// image) reads a contiguous run, [`InterleavedU8`] (the rendered wall canvas)
-/// reads the same run strided by the channel count. That is what lets the
-/// preview downscale run straight off the canvas — the canvas is never copied
-/// into planes, because the only thing that would want the planar copy is this
-/// load, and this load can stride.
+/// The implementations differ only in where the u8 → f32 widening reads from,
+/// never in an extra buffer: [`PlanarU8`] reads a contiguous run,
+/// [`InterleavedU8`] reads the same run strided by the channel count. That is
+/// what lets the preview downscale run straight off the wall canvas without
+/// copying it into planes.
 pub trait Source: Sync {
-    /// Image width in pixels.
     fn width(&self) -> usize;
-    /// Image height in pixels.
     fn height(&self) -> usize;
-    /// Number of channels.
     fn channels(&self) -> usize;
     /// Widen row `y` of `channel`, columns `span`, into `dst` at the same
     /// indices. Everything outside the span must be left untouched.
@@ -56,13 +32,8 @@ pub trait Source: Sync {
 }
 
 /// A decoded image as separate `u8` planes, row-major, `width * height` each.
-///
-/// Planar is the layout the crate uses for the decoded source; the single
-/// interleaved → planar conversion happens at the decode edge.
 pub struct PlanarU8 {
-    /// Image width in pixels.
     pub width: usize,
-    /// Image height in pixels.
     pub height: usize,
     /// One plane per channel.
     pub planes: Vec<Vec<u8>>,
@@ -82,7 +53,6 @@ impl PlanarU8 {
         }
     }
 
-    /// Number of channels.
     pub fn channels(&self) -> usize {
         self.planes.len()
     }
@@ -113,11 +83,8 @@ impl Source for PlanarU8 {
 pub struct InterleavedU8<'a> {
     /// Row-major, `width * height * channels` samples.
     pub data: &'a [u8],
-    /// Image width in pixels.
     pub width: usize,
-    /// Image height in pixels.
     pub height: usize,
-    /// Samples per pixel.
     pub channels: usize,
 }
 
@@ -142,19 +109,15 @@ impl Source for InterleavedU8<'_> {
     }
 }
 
-/// A rectangular source region, in fractional source-pixel coordinates.
-///
-/// This is Pillow's `box`: it is applied inside the weight tables, so cropping
-/// costs nothing and never materialises a sub-image.
+/// A rectangular source region, in fractional source-pixel coordinates. Applied
+/// inside the weight tables, so cropping never materialises a sub-image.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Window {
-    /// Left edge.
     pub x0: f64,
-    /// Top edge.
     pub y0: f64,
-    /// Right edge (exclusive).
+    /// Right edge, exclusive.
     pub x1: f64,
-    /// Bottom edge (exclusive).
+    /// Bottom edge, exclusive.
     pub y1: f64,
 }
 
@@ -212,12 +175,10 @@ impl Plan {
         }
     }
 
-    /// Output width in pixels.
     pub fn dst_width(&self) -> usize {
         self.dst_width
     }
 
-    /// Output height in pixels.
     pub fn dst_height(&self) -> usize {
         self.dst_height
     }
@@ -225,10 +186,8 @@ impl Plan {
     /// The source columns band `cols` reads from, in fractional source pixels.
     ///
     /// Adjacent bands overlap here by the horizontal kernel support (~`3 *
-    /// scale` columns each side): every band is computed independently from the
-    /// source, so the overlap is re-read (and re-H-passed), never shared. That
-    /// duplicate work is the accepted cost of the column split — it replaces the
-    /// vertical tap overlap the banner-row split used to pay.
+    /// scale` columns each side); every band is computed independently, so that
+    /// overlap is re-read and re-H-passed rather than shared.
     pub fn src_cols(&self, cols: &Range<usize>) -> (f64, f64) {
         let scale = (self.window.x1 - self.window.x0) / self.dst_width as f64;
         (
@@ -244,8 +203,8 @@ impl Plan {
     }
 
     /// The plan for `width` output columns covering the source interval
-    /// `src_cols` — the same thing [`Plan::columns`] builds, addressed by the
-    /// work item's own source rect instead of by output column indices.
+    /// `src_cols` — [`Plan::columns`] addressed by source rect instead of by
+    /// output column indices.
     pub fn band(&self, src_cols: (f64, f64), width: usize) -> ColumnPlan<'_> {
         assert!(width > 0, "empty band");
         let h = HWeights::new(self.src_width, src_cols.0, src_cols.1, width);
@@ -273,18 +232,11 @@ pub struct ColumnPlan<'a> {
 }
 
 impl ColumnPlan<'_> {
-    /// Output columns in this band.
     pub fn width(&self) -> usize {
         self.width
     }
 
     /// Resample this band out of `src`.
-    ///
-    /// The returned [`ColBand`] is the caller's local: the solver borrows its
-    /// cell patches straight out of it, and it dies with the work item. Note for
-    /// later: these per-item buffers (band + ring + scratch) are a natural fit
-    /// for a per-worker arena handed out without zeroing, which would remove the
-    /// per-item allocation traffic entirely.
     pub fn resample<S: Source + ?Sized>(&self, src: &S) -> ColBand {
         let plan = self.plan;
         assert_eq!(src.width(), plan.src_width, "source width mismatch");
@@ -362,7 +314,6 @@ pub struct ColBand {
 }
 
 impl ColBand {
-    /// Number of channels.
     pub fn channels(&self) -> usize {
         self.planes.len()
     }

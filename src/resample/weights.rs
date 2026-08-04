@@ -1,24 +1,10 @@
 //! Per-axis lanczos-3 weight tables.
-//!
-//! Built once per axis and shared by every row (or column) of that axis. The
-//! coefficient convention matches Pillow's `precompute_coeffs`:
-//!
-//! - box-centre mapping: output coordinate `i` samples the input at
-//!   `(i + 0.5) * scale - 0.5`,
-//! - kernel support `a = 3`, widened to `a * max(scale, 1)` when downscaling,
-//! - the tap window is *clipped* at the image edges and the surviving weights
-//!   are renormalised to sum 1 (so source indices never leave the image; no
-//!   edge clamping is needed).
-//!
-//! The number of taps (`ksize`) is uniform across an axis; clipped taps are
-//! present with weight 0, which keeps every inner loop remainder-free.
 
 use crate::simd::{AlignedVec, LANES};
 
 /// Lanczos kernel radius.
 const A: f64 = 3.0;
 
-/// Lanczos-3 kernel, `a = 3`.
 fn lanczos3(x: f64) -> f64 {
     if x == 0.0 {
         return 1.0;
@@ -30,7 +16,6 @@ fn lanczos3(x: f64) -> f64 {
     A * px.sin() * (px / A).sin() / (px * px)
 }
 
-/// Round `v` up to the next multiple of `m`.
 pub(crate) fn round_up(v: usize, m: usize) -> usize {
     v.div_ceil(m) * m
 }
@@ -45,12 +30,15 @@ struct Coeffs {
     weights: Vec<f32>,
 }
 
-/// Compute the lanczos-3 coefficients mapping the source interval
-/// `[in0, in1)` — in fractional source-pixel coordinates — onto `out_size`
-/// output samples.
+/// Lanczos-3 coefficients mapping the source interval `[in0, in1)` — in
+/// fractional source-pixel coordinates — onto `out_size` output samples.
 ///
-/// The interval is Pillow's `box`: cropping is expressed here, in the weight
-/// table, so a crop never costs a materialised sub-image.
+/// Convention: output `i` samples the input at `(i + 0.5) * scale - 0.5`, with
+/// support `A` widened to `A * max(scale, 1)` when downscaling. The tap window
+/// is clipped at the image edges and the surviving weights renormalised to sum
+/// 1, so source indices never leave the image and no edge clamping is needed.
+/// `ksize` is uniform across the axis — clipped taps are present with weight 0,
+/// which keeps every inner loop remainder-free.
 fn coeffs(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Coeffs {
     assert!(in_size > 0 && out_size > 0, "resample: zero-sized axis");
     assert!(in1 > in0, "resample: empty source window");
@@ -92,11 +80,10 @@ fn coeffs(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Coeffs {
 
 /// Horizontal weights, laid out for aligned lane loads.
 ///
-/// The facade only hands out lane views at lane-aligned offsets, so each output
-/// pixel's window starts at `start_lane * LANES` and the sub-lane offset
-/// (`start - start_lane * LANES`) is baked into the table by shifting the
-/// weights inside a padded window of `win` floats. The inner loop is then a
-/// pure aligned `mul_add` chain plus one `hsum`.
+/// Lane views only start at lane-aligned offsets, so each output pixel's window
+/// starts at `start_lane * LANES` and the sub-lane offset is baked into the
+/// table by shifting the weights inside a padded window of `win` floats. The
+/// inner loop is then a pure aligned `mul_add` chain plus one `hsum`.
 pub struct HWeights {
     /// Number of output pixels.
     pub out_len: usize,
@@ -111,8 +98,6 @@ pub struct HWeights {
 }
 
 impl HWeights {
-    /// Build the table mapping the source interval `[in0, in1)` of an axis of
-    /// `in_size` samples onto `out_size` output pixels.
     pub fn new(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Self {
         let c = coeffs(in_size, in0, in1, out_size);
         let win = round_up(c.ksize + LANES - 1, LANES);
@@ -150,9 +135,7 @@ impl HWeights {
 }
 
 /// Vertical weights: plain scalars, broadcast with `F32s::splat` in the V pass.
-///
-/// No alignment shifting here — the V pass walks whole rows, which are aligned
-/// by construction, so the taps enter as splatted scalars and nothing is wasted.
+/// No alignment shifting is needed — the V pass walks whole aligned rows.
 pub struct VWeights {
     /// Taps per output row (uniform).
     pub ksize: usize,
@@ -163,8 +146,6 @@ pub struct VWeights {
 }
 
 impl VWeights {
-    /// Build the table mapping the source interval `[in0, in1)` of an axis of
-    /// `in_size` samples onto `out_size` output rows.
     pub fn new(in_size: usize, in0: f64, in1: f64, out_size: usize) -> Self {
         let c = coeffs(in_size, in0, in1, out_size);
         Self {

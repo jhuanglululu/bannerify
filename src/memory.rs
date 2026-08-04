@@ -1,19 +1,9 @@
 //! Minimal allocation tracking, for `--debug` memory reporting.
-//!
-//! A pass-through [`GlobalAlloc`] over [`System`] that keeps two atomic
-//! counters: bytes currently live and the high-water mark. No dependencies, no
-//! allocator replacement — the point is to answer "did this run keep memory
-//! bounded", which is the property the pipeline design is built around.
-//!
-//! Cost is one relaxed add and one `fetch_max` per allocation; it is not a
-//! profiler and does not attribute allocations to call sites.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Bytes currently allocated.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
-/// High-water mark of [`LIVE`].
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 /// System allocator plus live/peak byte counters.
@@ -73,17 +63,14 @@ unsafe impl GlobalAlloc for Tracking {
     }
 }
 
-/// Bytes currently allocated.
 pub fn live_bytes() -> usize {
     LIVE.load(Ordering::Relaxed)
 }
 
-/// Highest number of bytes allocated at once so far.
 pub fn peak_bytes() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
 
-/// Format a byte count for logs.
 pub fn format_bytes(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut value = bytes as f64;

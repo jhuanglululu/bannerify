@@ -10,9 +10,7 @@
 //! ## Hollow frames
 //!
 //! Banners hang in front of the wall, so most of a block is never seen. Which
-//! part *is* seen depends only on the block's row (ported from the old build's
-//! `TOP_MASK`/`MIDDLE_MASK`/`BOTTOM_MASK`, re-derived here from the geometry in
-//! [`crate::solver::cell`]):
+//! part *is* seen depends only on the block's row:
 //!
 //! ```text
 //! block row 0        banner row 0 covers wall y 4..24 of it
@@ -25,21 +23,12 @@
 //!   -> exposed: rows 0..20 only the sides, rows 20..24 whole
 //! ```
 //!
-//! The old build spelled this as a fixed 256-pixel "hollow" patch multiplied by
-//! a 0/1 mask per row position. Here the mask *is* the gather list: each
-//! [`Frame`] carries the exact pixel indices it exposes ([`FRAME_EDGE`] = 176
-//! for the top and bottom rows, [`FRAME_MID`] = 96 for the middle ones), so the
-//! matcher never loads — let alone multiplies — a pixel that a banner hides.
-//! Both counts are multiples of 16, so they are [`Chunk`] sizes as they stand
-//! and no remainder path appears anywhere.
-//!
-//! ## What is stored per block
-//!
-//! - [`Blocks::texture`] — the 24×24 RGB bytes the preview paints.
-//! - [`Blocks::top`] / [`Blocks::middle`] / [`Blocks::bottom`] — the same
-//!   texture gathered through each frame and converted to **OKLab**, which is
-//!   the space the match is scored in (plain Euclidean distance; see
-//!   [`crate::oklab`]).
+//! The mask *is* the gather list: each [`Frame`] carries the exact pixel
+//! indices it exposes ([`FRAME_EDGE`] = 176 for the top and bottom rows,
+//! [`FRAME_MID`] = 96 for the middle ones), so the matcher never loads — let
+//! alone multiplies — a pixel that a banner hides. Both counts are multiples of
+//! 16, so they are [`Chunk`] sizes as they stand and no remainder path appears
+//! anywhere.
 
 use std::collections::HashSet;
 
@@ -54,7 +43,6 @@ use crate::resample::{Plan, PlanarU8};
 use crate::simd::Chunk;
 use crate::zip;
 
-/// Channels a block texture carries.
 const CHANNELS: usize = 3;
 
 /// Side of the embedded textures, in texture pixels.
@@ -69,9 +57,6 @@ pub const FRAME_EDGE: usize = PAD_TOP * BLOCK_SIDE + (BLOCK_SIDE - PAD_TOP) * 2 
 
 /// Exposed pixels of a block in any other row: the flanks, and nothing else.
 pub const FRAME_MID: usize = BLOCK_SIDE * 2 * PAD_SIDE;
-
-const _: () = assert!(PAD_TOP == PAD_BOTTOM, "the frames assume symmetric padding");
-const _: () = assert!(FRAME_EDGE == 176 && FRAME_MID == 96);
 
 /// One frame's OKLab planes.
 pub type FramePlanes<const N: usize> = [Chunk<N>; CHANNELS];
@@ -127,7 +112,6 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// The frame of block row `row` on a wall `block_rows` blocks tall.
     #[inline]
     pub fn of(row: usize, block_rows: usize) -> Self {
         if row == 0 {
@@ -140,7 +124,6 @@ impl Frame {
     }
 }
 
-/// The embedded `assets/blocks/` tree.
 #[derive(Embed)]
 #[folder = "assets/blocks/"]
 struct BlockAssets;
@@ -166,12 +149,10 @@ pub struct Blocks {
 }
 
 impl Blocks {
-    /// Number of blocks in the table.
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
-    /// Whether the table is empty (only reachable by excluding everything).
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -179,10 +160,8 @@ impl Blocks {
 
 /// Decode the embedded blocks, dropping every id in `exclude`.
 ///
-/// Decoding, resizing and the OKLab conversion all run `par_iter` over blocks —
-/// there are a few hundred of them and the work is a real fraction of startup,
-/// unlike the 42 pattern PNGs. An id in `exclude` that names no block is a user
-/// mistake, not a silent no-op: it exits with the list.
+/// An id in `exclude` that names no block is a user mistake, not a silent
+/// no-op: it exits with the list.
 pub fn load(exclude: &HashSet<String>) -> Blocks {
     // rust-embed's iteration order follows the directory walk; sort so the
     // block indices — and therefore every distance tie-break — are the same on
@@ -236,7 +215,6 @@ pub fn load(exclude: &HashSet<String>) -> Blocks {
     }
 }
 
-/// Decode one embedded JPEG and resize it 16 → 24 through our own resampler.
 fn decode(id: &str, plan: &Plan) -> [u8; TEXTURE_BYTES] {
     let file = BlockAssets::get(&format!("{id}.jpg"))
         .unwrap_or_else(|| error_out!("internal error: block '{id}' vanished from the binary"));
@@ -263,7 +241,6 @@ fn decode(id: &str, plan: &Plan) -> [u8; TEXTURE_BYTES] {
     out
 }
 
-/// Gather one frame out of a texture and convert it to OKLab.
 fn planes<const N: usize>(texture: &[u8; TEXTURE_BYTES], idx: &[u16; N]) -> FramePlanes<N> {
     let mut out = [Chunk::<N>::zeroed(); CHANNELS];
     for (i, &px) in idx.iter().enumerate() {

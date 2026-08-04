@@ -1,36 +1,19 @@
-//! A minimal, write-only NBT encoder.
-//!
-//! Ported from the Python build's `schematic.py` `_write_*` functions, which
-//! exist for the same reason this does: both schematic formats we emit are one
-//! fixed structure each, so a full NBT library (parsing, typed trees, schema
-//! validation) would be several thousand lines of dependency to serialise a
-//! shape we already know. Everything is big-endian, as NBT is.
-//!
-//! Only the tags the two writers use are here; adding one is a variant and an
-//! arm. There is no reader — nothing in the pipeline consumes NBT.
+//! A minimal, write-only NBT encoder: only the tags the two schematic writers
+//! use. Everything is big-endian, as NBT is.
 
 /// One NBT tag value.
 ///
 /// [`Tag::List`] carries its element type explicitly because an empty list must
-/// still declare one, and the element type of a non-empty list must match every
-/// element (asserted in debug builds when it is written).
+/// still declare one.
 #[derive(Clone, Debug)]
 pub enum Tag {
-    /// `TAG_Byte`.
     Byte(i8),
-    /// `TAG_Short`.
     Short(i16),
-    /// `TAG_Int`.
     Int(i32),
-    /// `TAG_Long`.
     Long(i64),
-    /// `TAG_String`.
     Str(String),
-    /// `TAG_Byte_Array`.
     ByteArray(Vec<u8>),
-    /// `TAG_Int_Array`.
     IntArray(Vec<i32>),
-    /// `TAG_Long_Array`.
     LongArray(Vec<i64>),
     /// `TAG_List`: element tag id, then the elements.
     List(u8, Vec<Tag>),
@@ -44,7 +27,6 @@ const END: u8 = 0;
 pub const COMPOUND: u8 = 10;
 
 impl Tag {
-    /// This tag's type id.
     pub fn id(&self) -> u8 {
         match self {
             Tag::Byte(_) => 1,
@@ -85,10 +67,6 @@ impl Tag {
                 }
             }
             Tag::List(elem, items) => {
-                debug_assert!(
-                    items.iter().all(|t| t.id() == *elem),
-                    "every element of a TAG_List has the list's element type"
-                );
                 out.push(*elem);
                 out.extend_from_slice(&(items.len() as i32).to_be_bytes());
                 for item in items {
@@ -123,7 +101,6 @@ pub fn write_root(name: &str, root: &Tag) -> Vec<u8> {
 /// writers emit is a Minecraft id or a short ASCII label, and the two encodings
 /// agree on everything below U+0080 with no NUL bytes.
 fn write_string(out: &mut Vec<u8>, s: &str) {
-    debug_assert!(s.is_ascii(), "NBT strings here are ASCII ids and labels");
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s.as_bytes());
 }

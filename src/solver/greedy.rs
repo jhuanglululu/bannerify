@@ -1,32 +1,10 @@
 //! Greedy fill: pick a base dye, then one (pattern, dye) layer at a time,
 //! each time the pair that minimises the weighted SSE against the target patch.
 //!
-//! Ported from `../bannerify-old/src/solver/fill.rs` (and its `build_prefix`)
-//! onto the [`simd`](crate::simd) facade. The algebra is unchanged — see
-//! [`crate::color`] for the expansion — so the only cost per layer is
-//!
-//! - **one** pass over the patch per pattern, reducing the two residual moments
-//!   `Σ res²` and `2·Σ res·α` per channel, and
-//! - a scalar closed-form sweep of the 16 dyes over those six numbers.
-//!
-//! i.e. `O(patterns)` passes, not `O(patterns × dyes)`. The dye sweep stays
-//! scalar exactly as in the old build: it consumes already-reduced scalars, so
-//! there is nothing left to vectorise.
-//!
-//! ## Differences from the old `fill.rs`
-//!
-//! 1. **The last prefix is built.** The old code skipped compositing the final
-//!    layer (`if layer != n_layers - 1`) and then returned the whole prefix
-//!    vector to a caller that ignored it. Here the final composite *is* the
-//!    thing the preview render draws — and the thing every later stage scores
-//!    against — so it is built.
-//! 2. **Buffers are owned by a reusable [`Workspace`](super::Workspace)**
-//!    instead of a fresh `uninit!` allocation per banner, and the loops run on
-//!    lane views with a runtime length rather than a `const HW` (see
-//!    [`super::workspace`]).
-//! 3. **The final error is reported.** The dye sweep's minimum at the last
-//!    layer already *is* the composite's weighted SSE, so it costs nothing to
-//!    keep — the old build recomputed error elsewhere.
+//! The layer error is linear in the dye colour, so each layer costs **one**
+//! pass over the patch per pattern — reducing the residual moments `Σ res²` and
+//! `2·Σ res·α` per channel — plus a scalar closed-form sweep of the 16 dyes
+//! over those six numbers: `O(patterns)` passes, not `O(patterns × dyes)`.
 
 use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
 use crate::simd::F32s;
@@ -37,9 +15,8 @@ use super::workspace::{Plane, Solution, view, view_mut};
 /// Greedy-fill the patch in `target`, writing the composite chain into
 /// `prefixes[0..=n_layers]`.
 ///
-/// `off`/`hw` are the cell's lane offset and pixel count
-/// ([`super::workspace`]); `alpha2[p]` is `Σ α²` of pattern `p` over exactly
-/// that view.
+/// `off`/`hw` are the cell's lane offset and pixel count; `alpha2[p]` is
+/// `Σ α²` of pattern `p` over exactly that view.
 pub(super) fn fill(
     target: &[Plane; 3],
     prefixes: &mut [[Plane; 3]],
@@ -49,8 +26,6 @@ pub(super) fn fill(
     off: usize,
     hw: usize,
 ) -> Solution {
-    debug_assert_eq!(alphas.len(), alpha2.len());
-
     let (base, base_err) = best_base(target, off, hw);
     for ch in 0..3 {
         let c = F32s::splat(COLORS_F32[base][ch]);
@@ -68,8 +43,8 @@ pub(super) fn fill(
 
         let prefix = &prefixes[layer];
         for (p, alpha) in alphas.iter().enumerate() {
-            // One pass over the patch: the residual moments of laying *any*
-            // dye through this pattern on top of the current composite.
+            // The residual moments of laying *any* dye through this pattern on
+            // top of the current composite.
             let mut res2 = [0.0_f32; 3];
             let mut res_2a = [0.0_f32; 3];
             for ch in 0..3 {
@@ -89,7 +64,7 @@ pub(super) fn fill(
                 res_2a[ch] = 2.0 * acc_a.hsum();
             }
 
-            // ...and the closed form scores all 16 dyes from those six.
+            // The closed form scores all 16 dyes from those six numbers.
             for c in 0..NUM_COLORS {
                 let color = COLORS_F32[c];
                 let err = W_PERCEPTUAL[0] * (res2[0] + res_2a[0] * color[0])
@@ -106,9 +81,8 @@ pub(super) fn fill(
         layers.push(best);
         error = min_err;
 
-        // Composite the chosen layer forward. Unlike the old build this also
-        // runs for the last layer, because `prefixes[n_layers]` is the image
-        // every later stage scores and the preview render draws.
+        // Composite the chosen layer forward, the last layer included:
+        // `prefixes[n_layers]` is the image every later stage scores.
         let (done, rest) = prefixes.split_at_mut(layer + 1);
         build_prefix(&done[layer], &mut rest[0], &alphas[best.0], best.1, off);
     }
@@ -156,8 +130,7 @@ fn best_base(target: &[Plane; 3], off: usize, hw: usize) -> (usize, f32) {
     (base, min_err)
 }
 
-/// `next = prefix · (1 − α) + color · α`, the one compositing step, ported from
-/// the old build's `build_prefix`.
+/// `next = prefix · (1 − α) + color · α`, the one compositing step.
 pub(super) fn build_prefix(
     prefix: &[Plane; 3],
     next: &mut [Plane; 3],

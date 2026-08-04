@@ -1,4 +1,4 @@
-//! Fixed-size 64-byte-aligned buffer, the compile-time-sized source of lane views.
+//! Fixed-size 64-byte-aligned `f32` buffer.
 
 use core::ops::{Deref, DerefMut};
 
@@ -11,27 +11,25 @@ use super::{F32s, LANES};
 pub struct Chunk<const N: usize>([f32; N]);
 
 impl<const N: usize> Chunk<N> {
-    /// Compile-time `N % 16 == 0` check; instantiate from every entry point.
+    /// Compile-time `N % 16 == 0` check that the lane views' soundness rests on;
+    /// instantiate from every entry point.
     const CHECK_N: () = assert!(
         N.is_multiple_of(16),
         "Chunk<N>: N must be a non-zero multiple of 16"
     );
 
-    /// All elements zero.
     #[inline]
     pub fn zeroed() -> Self {
         const { Self::CHECK_N };
         Self([0.0; N])
     }
 
-    /// All elements `x`.
     #[inline]
     pub fn splat(x: f32) -> Self {
         const { Self::CHECK_N };
         Self([x; N])
     }
 
-    /// Overwrite every element with `x`.
     #[inline]
     pub fn fill(&mut self, x: f32) {
         self.0.fill(x);

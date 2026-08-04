@@ -1,15 +1,9 @@
 //! Banner-wall geometry: the fixed pixel dimensions of banners and blocks, and
 //! the wall-size arithmetic the resize target is derived from.
 //!
-//! Ported from `../bannerify-old/src/geometry.rs`. Everything here is
-//! phase-2-ready: the solver and exporter address banner pixels through these
-//! constants, the CLI currently uses only the wall-size and inference helpers.
-//!
-//! Layout: banners hang on a wall of blocks. A block is [`BLOCK_SIDE`] pixels
-//! square; a banner is [`BANNER_W`] × [`BANNER_H`] pixels, and the top
-//! [`HIDDEN_H`] pixels of a banner are covered by the banner above it, leaving
-//! [`VISIBLE_H`] visible. A wall of `rows` banner rows is therefore
-//! `rows + 1` blocks tall.
+//! Banners hang on a wall of blocks, and the top [`HIDDEN_H`] pixels of a
+//! banner are covered by the banner above it, so a wall of `rows` banner rows
+//! is `rows + 1` blocks tall.
 
 /// Banner width, in banner pixels.
 pub const BANNER_W: usize = 20;
@@ -49,25 +43,21 @@ pub const MID_SIDE: usize = BLOCK_SIDE - PAD_TOP - PAD_BOTTOM;
 /// Column offsets of the block pixels flanking a banner.
 pub const MIDDLE_OFFSET: [usize; 4] = [0, 1, BLOCK_SIDE - 2, BLOCK_SIDE - 1];
 
-/// Pixel offset from the left of the wall for banner column `column`.
 #[inline]
 pub const fn offset_column(column: usize) -> usize {
     column * BLOCK_SIDE + PAD_SIDE
 }
 
-/// Total wall width in pixels for `columns` banner columns.
 #[inline]
 pub const fn wall_width(columns: usize) -> usize {
     columns * BLOCK_SIDE
 }
 
-/// Pixel offset from the top of the wall for banner row `row`.
 #[inline]
 pub const fn offset_row(row: usize) -> usize {
     row * BLOCK_SIDE + PAD_TOP + HIDDEN_H
 }
 
-/// Total wall height in pixels for `rows` banner rows (`rows + 1` blocks).
 #[inline]
 pub const fn wall_height(rows: usize) -> usize {
     (rows + 1) * BLOCK_SIDE

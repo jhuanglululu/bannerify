@@ -1,13 +1,6 @@
 //! The 16 Minecraft dye colours and the derived tables the solver's closed-form
 //! error expansion needs.
 //!
-//! Ported from `../bannerify-old/src/color.rs`. The old build also kept the 16
-//! dyes packed into SIMD registers (`COLORS_R/G/B`) for a vectorised colour
-//! sweep; the greedy solver never used them — its colour loop is a scalar
-//! closed form over 16 candidates, evaluated once per pattern on three
-//! already-reduced moments — so only the scalar tables are ported here. SIMD
-//! colour tables land with the passes that actually want them (phase 2b).
-//!
 //! ## The expansion these tables serve
 //!
 //! For a target `t`, a prefix composite `p` and a pattern alpha `α`, laying dye
@@ -23,7 +16,6 @@
 //! those plus the pattern's `Σ α²` ([`COLORS_WSQ_SUM`] folds the per-channel
 //! weights into the `c²` term).
 
-/// Number of dyes a banner can use.
 pub const NUM_COLORS: usize = 16;
 
 /// Minecraft dye ids, in the canonical order the tables below use.
@@ -66,7 +58,6 @@ pub const COLORS_RGB: [[u8; 3]; NUM_COLORS] = [
     [29, 29, 33],    // black
 ];
 
-/// [`COLORS_RGB`] widened once, so the solver never converts in a loop.
 pub const COLORS_F32: [[f32; 3]; NUM_COLORS] = {
     let mut out = [[0.0_f32; 3]; NUM_COLORS];
     let mut i = 0;
@@ -79,7 +70,7 @@ pub const COLORS_F32: [[f32; 3]; NUM_COLORS] = {
     out
 };
 
-/// Per-channel error weights: perceptual luma, as in both old builds.
+/// Per-channel error weights: perceptual luma.
 pub const W_PERCEPTUAL: [f32; 3] = [0.299, 0.587, 0.114];
 
 /// `Σ_ch w_ch · c_ch²` per dye — the `c²` coefficient of the expansion above,

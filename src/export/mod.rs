@@ -1,25 +1,5 @@
-//! Turning the solved wall into the things a player can use: one self-contained
-//! HTML page, with the schematics and the preview images embedded in it.
-//!
-//! [`Wall`] is the read-only view every writer takes — the solutions, the
-//! matched blocks and the tables their indices point into — so no writer owns
-//! or copies the grid, and all of them agree on what "row 3, column 5" means:
-//! **rows count from the top, columns from the left, both 1-based in anything a
-//! user reads and 0-based in anything the code indexes.**
-//!
-//! - [`nbt`] — the write-only NBT encoder both schematics share.
-//! - [`schematic`] — `.schem` (Sponge v2) and `.litematic` (Litematica v6).
-//! - [`html`] — the page itself.
-//!
-//! ## Names
-//!
-//! Our pattern asset filenames **are** the in-game registry ids: all 42 of
-//! `assets/banners/` appear verbatim in the `minecraft:banner_pattern`
-//! registry, so `/give` and the block-entity `patterns` tags can use
-//! [`crate::pattern::Patterns::names`] unchanged and no id mapping table
-//! exists. What does need translating is the *display* name a crafting guide
-//! should print — the heraldic ones ("Bend Sinister", "Bordure Indented") —
-//! and that is [`pattern_label`].
+//! Turning the solved wall into the things a player can use: the shared [`Wall`]
+//! view, and the helpers the schematic and HTML writers share.
 
 use std::collections::HashMap;
 
@@ -35,15 +15,12 @@ pub mod schematic;
 /// The finished wall, as every exporter reads it.
 ///
 /// Both grids arrive **column-major** — the pipeline's work item is a block
-/// column — and are transposed only by the accessors, never by a copy.
+/// column — and are transposed only by the accessors, never by a copy. Rows
+/// count from the top, columns from the left, 0-based.
 pub struct Wall<'a> {
-    /// Banner rows.
     pub rows: usize,
-    /// Banner (and block) columns.
     pub columns: usize,
-    /// The pattern table the solutions index.
     pub patterns: &'a Patterns,
-    /// The block table [`Wall::block_ids`] indexes.
     pub blocks: &'a Blocks,
     /// `block_ids[col][block_row]`.
     pub block_ids: &'a [Vec<usize>],
@@ -57,17 +34,14 @@ impl Wall<'_> {
         self.rows + 1
     }
 
-    /// Banners in the wall.
     pub fn banners(&self) -> usize {
         self.rows * self.columns
     }
 
-    /// The solution for banner cell `(row, col)`, 0-based from the top left.
     pub fn cell(&self, row: usize, col: usize) -> &Solution {
         &self.cells[col][row]
     }
 
-    /// The `minecraft:`-prefixed block id behind block cell `(row, col)`.
     pub fn block(&self, row: usize, col: usize) -> &str {
         &self.blocks.qualified[self.block_ids[col][row]]
     }
@@ -87,7 +61,6 @@ pub struct Materials {
 }
 
 impl Materials {
-    /// Count a finished wall.
     pub fn of(wall: &Wall<'_>) -> Self {
         let mut m = Self {
             wool: [0; NUM_COLORS],
@@ -102,17 +75,15 @@ impl Materials {
         m
     }
 
-    /// Total pattern layers across the wall — the header's "dye" figure.
     pub fn total_dye(&self) -> usize {
         self.dye.iter().sum()
     }
 }
 
-/// The `/give` item for one banner, in 1.21+ component syntax.
-///
-/// `white_banner[banner_patterns=[{pattern:"bend",color:"orange"}]]` — the
-/// pattern is the registry id, unprefixed (the `minecraft:` namespace is the
-/// default), and a banner with no layers is just the item.
+/// The `/give` item for one banner, in 1.21+ component syntax:
+/// `white_banner[banner_patterns=[{pattern:"bend",color:"orange"}]]`. The
+/// pattern is the registry id, unprefixed — `minecraft:` is the default
+/// namespace.
 pub fn give_command(wall: &Wall<'_>, cell: &Solution) -> String {
     let item = format!("{}_banner", COLOR_NAMES[cell.base]);
     if cell.layers.is_empty() {
@@ -131,22 +102,17 @@ pub fn give_command(wall: &Wall<'_>, cell: &Solution) -> String {
     format!("/give @p {item}[banner_patterns=[{}]]", layers.join(","))
 }
 
-/// A dye or wool colour as `#rrggbb`, for the page's swatches.
 pub fn hex(color: usize) -> String {
     let [r, g, b] = COLORS_RGB[color];
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// A colour id as a label: `light_blue` → `Light blue`.
 pub fn color_label(color: usize) -> String {
     title_case(COLOR_NAMES[color])
 }
 
-/// The in-game display name of a banner pattern.
-///
-/// The heraldic names from Minecraft's language file — what the crafting table
-/// and the pattern's tooltip call the layer. Ids not in the table are shown
-/// title-cased, which is what a future pattern would want anyway.
+/// The in-game display name of a banner pattern: the heraldic names from
+/// Minecraft's language file. Ids not in the table fall back to title case.
 pub fn pattern_label(id: &str) -> String {
     let name = match id {
         "base" => "Base",
@@ -197,7 +163,6 @@ pub fn pattern_label(id: &str) -> String {
     name.to_string()
 }
 
-/// `light_blue` → `Light blue`.
 fn title_case(id: &str) -> String {
     let mut out = id.replace('_', " ");
     if let Some(first) = out.get_mut(..1) {
@@ -206,7 +171,7 @@ fn title_case(id: &str) -> String {
     out
 }
 
-/// `1234567` → `1,234,567`, the page's number format.
+/// `1234567` → `1,234,567`.
 pub fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -220,9 +185,6 @@ pub fn thousands(n: usize) -> String {
 }
 
 /// Standard base64, for the page's `data:` URIs.
-///
-/// Hand-rolled: the alphabet is twelve lines and the alternative is a
-/// dependency whose entire job is those twelve lines.
 pub fn base64(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -249,7 +211,6 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Escape the five characters that must not appear raw in HTML text.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -265,8 +226,6 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// Blocks the wall actually uses, with how many of each — reported on the page
-/// so a builder knows what to gather.
 pub fn block_counts(wall: &Wall<'_>) -> Vec<(String, usize)> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for col in wall.block_ids {

@@ -1,26 +1,7 @@
-//! The output: one self-contained HTML page.
+//! The output: one self-contained HTML page, with the previews, the schematics
+//! and the per-cell solution blob all inlined.
 //!
-//! Everything is inlined — both compare panes, both schematics and the whole
-//! per-cell solution — as `data:` URIs and one JSON blob, so the file can be
-//! mailed, dropped in a Discord channel or opened from a USB stick with nothing
-//! else beside it. The two panes are encoded differently on purpose: the
-//! generated wall is PNG (it is flat-coloured, it compresses to nothing, and it
-//! is the image the download button hands over), while the original pane is a
-//! *photograph* shown at the same size — PNG would make it the single largest
-//! thing in the file, several times the wall's own weight, for a pane nobody
-//! downloads. There is no template engine: the layout is a single static
-//! page, so the "engine" would only ever substitute the values that are already
-//! `format!` arguments here.
-//!
-//! ## What the JavaScript may do
-//!
-//! Look things up, and nothing else. The preview is a *pre-rendered image*; the
-//! page never draws a banner. The crafting guide reads `DATA` — the compact
-//! blob below — and prints the layers of one cell, which is a table lookup with
-//! a `join`. That boundary is deliberate: the wall the page shows is the wall
-//! the exporter rendered, not a re-derivation a viewer could disagree with.
-//!
-//! ## The blob
+//! ## The `DATA` blob the page's JavaScript reads
 //!
 //! One object of parallel arrays, indices everywhere:
 //!
@@ -32,10 +13,6 @@
 //! g[row][col] = [base, pattern, dye, pattern, dye, ...]
 //! k[row][col] = the block behind that banner
 //! ```
-//!
-//! A cell is a flat little integer array — about a dozen bytes — because the
-//! obvious `{"base": "...", "patterns": [{...}]}` shape costs sixty, and the
-//! blob is the one part of the page that grows with the wall.
 
 use crate::color::NUM_COLORS;
 use crate::export::{
@@ -53,17 +30,14 @@ pub struct Report<'a> {
     /// The original image, encoded, at the preview's size.
     pub original: &'a [u8],
     /// MIME type of [`Report::original`] — the original pane is a photograph,
-    /// so it is JPEG where the banner wall is PNG (see [`page`]).
+    /// so it is JPEG where the banner wall is PNG.
     pub original_mime: &'a str,
     /// Preview pixel size, which is also the compare slider's aspect ratio.
     pub size: (usize, usize),
-    /// The `.litematic` bytes.
     pub litematic: &'a [u8],
-    /// The `.schem` bytes.
     pub schem: &'a [u8],
 }
 
-/// Render the whole page.
 pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     let materials = Materials::of(wall);
     let mut out = String::with_capacity(
@@ -149,11 +123,6 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     );
 
     // ---- crafting guide ----------------------------------------------------
-    // Two columns: the picker, the address line and the give command on the
-    // left, the step table on the right — the table is the tall element, and
-    // pairing it with the short controls halves the section's height. The
-    // shell is static and the lookup only fills three holes in it, which keeps
-    // the JavaScript to what it is allowed to be (see the module docs).
     out.push_str(&format!(
         "<h2>Crafting guide <span class=\"hint\">rows 1–{} top to bottom, \
          columns 1–{} left to right</span></h2>\n\n\
@@ -236,13 +205,8 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
 /// A list of `(item, count)` pairs, flowed into as many `Item · Count` columns
 /// as the viewport fits.
 ///
-/// A single two-column table would be a metre of scrolling for the sixteen dye
-/// colours and rather more for the blocks, and a table with a *fixed* number of
-/// repeated column pairs cannot narrow without hiding data. So the pairs are
-/// grid items instead: `auto-fill` picks the column count from the available
-/// width, filling left to right, and collapses to one column on a phone with
-/// nothing lost. `item` is trusted HTML (a swatch or a `<code>` id); the
-/// callers escape their own text.
+/// `item` is trusted HTML (a swatch or a `<code>` id); the callers escape their
+/// own text.
 fn kv_grid(out: &mut String, entries: impl Iterator<Item = (String, String)>) {
     out.push_str("<div class=\"kv-grid\">\n");
     for (item, count) in entries {
@@ -253,7 +217,6 @@ fn kv_grid(out: &mut String, entries: impl Iterator<Item = (String, String)>) {
     out.push_str("</div>\n\n");
 }
 
-/// One `data:` download button.
 fn download(out: &mut String, class: &str, label: &str, mime: &str, data: &[u8], filename: &str) {
     out.push_str(&format!(
         "  <a class=\"{class}\" download=\"{}\" href=\"data:{mime};base64,",
@@ -353,8 +316,6 @@ const HEAD_OPEN: &str = "<!doctype html>\n<html lang=\"en\">\n<head>\n\
 
 const HEAD_CLOSE: &str = " — Banner chart</title>\n";
 
-/// GitHub's rendered-README look, from the layout example in
-/// `context/presentations/`.
 const STYLE: &str = r#"<style>
 :root{
   --fg:#1f2328;
@@ -473,7 +434,6 @@ hr{border:0;border-top:1px solid var(--border-muted);margin:24px 0}
 
 "#;
 
-/// The page's only behaviour: read a cell out of `DATA` and print it.
 const SCRIPT: &str = r#"
 function group(n) { return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
