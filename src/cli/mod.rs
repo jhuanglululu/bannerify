@@ -117,13 +117,9 @@ pub struct Args {
     #[arg(short = 'C', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub refinement_candidate: Option<usize>,
 
-    /// Candidates per refinement window step that are scored EXACTLY, by
-    /// perceptual (OKLab) distance on the fully composited banner, instead of
-    /// by the cheap closed-form sRGB error: [default: 20]. The closed form then
-    /// only shortlists; the beam ranks and prunes on the exact numbers. 0 turns
-    /// the exact scoring off, which is faster and noticeably worse. Below
-    /// --refinement-candidate this also starves the beam, so it is worse than 0
-    /// -- either leave it off or keep it comfortably above the beam width
+    /// Candidates per window step re-scored exactly in OKLab: [default: 20].
+    /// 0 disables exact scoring (faster, worse); otherwise keep it well above
+    /// the beam width (--refinement-candidate)
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'x', long, value_name = "NUMBER_OF_CANDIDATES")]
     pub exact_candidates: Option<usize>,
