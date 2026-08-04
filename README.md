@@ -19,7 +19,9 @@ cargo build --release
 ```
 
 The binary is `target/release/bannerify`. All assets (banner patterns,
-block textures) are embedded — the binary is standalone.
+block textures) are embedded — the binary is standalone. Windows and Linux
+x86 builds target AVX2+FMA by default (any Intel/AMD CPU from ~2013 onwards);
+build with `--features force-scalar` for older machines.
 
 ## Usage
 

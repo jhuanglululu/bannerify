@@ -274,6 +274,8 @@ fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
 
 /// Parse arguments, validate, and run the pipeline.
 pub fn run_cli() {
+    check_cpu_features();
+
     let args = Args::parse();
     let config = Config::from(args);
 
@@ -293,6 +295,58 @@ pub fn run_cli() {
 
     run(&config);
 }
+
+/// Refuse to run an AVX2 build on a CPU that predates AVX2.
+///
+/// Compiled in only alongside the AVX2 SIMD backend (`src/simd/mod.rs` gates it
+/// on the same cfg), so on aarch64 — and on any scalar build — this is an empty
+/// function that vanishes.
+///
+/// The check is raw `cpuid` rather than `is_x86_feature_detected!` on purpose:
+/// that macro is `cfg!(target_feature = ..) || runtime_detect(..)`, and this
+/// build enables `+avx2,+fma` crate-wide (`.cargo/config.toml`), so the macro
+/// would fold to a compile-time `true` and never fire. `cpuid` asks the CPU.
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma",
+    not(feature = "force-scalar")
+))]
+fn check_cpu_features() {
+    use std::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+
+    // SAFETY: `cpuid` leaves 0 and 1 exist on every x86_64 CPU; leaf 7 is read
+    // only after leaf 0 reports it as supported, and `xgetbv` only after the
+    // OSXSAVE bit says the OS enabled it.
+    let ok = unsafe {
+        let leaf1 = __cpuid(1);
+        let fma = leaf1.ecx & (1 << 12) != 0;
+        let osxsave = leaf1.ecx & (1 << 27) != 0;
+        let avx = leaf1.ecx & (1 << 28) != 0;
+        // The OS must actually preserve the XMM and YMM register state.
+        let os_ymm = osxsave && (_xgetbv(0) & 0b110) == 0b110;
+        let avx2 = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).ebx & (1 << 5) != 0;
+        fma && avx && os_ymm && avx2
+    };
+
+    if !ok {
+        error_out!(
+            "this build requires {} (any Intel/AMD CPU from ~2013 onwards); \
+             rebuild with {} for older CPUs",
+            "AVX2+FMA".red(),
+            "--features force-scalar".yellow()
+        );
+    }
+}
+
+/// No-op: this build's SIMD backend has no runtime CPU requirements.
+#[cfg(not(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma",
+    not(feature = "force-scalar")
+)))]
+fn check_cpu_features() {}
 
 /// Decode, lay out, run the column items, write the export.
 fn run(config: &Config) {

@@ -4,10 +4,11 @@
 //! outside it names the lane count or an architecture type. See
 //! `context/designs/simd-interface.md`.
 //!
-//! Backends: aarch64 NEON (`float32x4_t`, `LANES == 4`) and a scalar `f32`
-//! fallback (`LANES == 1`, correctness oracle). The `force-scalar` cargo
-//! feature selects the scalar backend on any architecture so the two can be
-//! cross-checked on the same machine.
+//! Backends: aarch64 NEON (`float32x4_t`, `LANES == 4`), x86_64 AVX2+FMA
+//! (`__m256`, `LANES == 8`), and a scalar `f32` fallback (`LANES == 1`,
+//! correctness oracle — also the path for an x86_64 build without AVX2/FMA
+//! enabled). The `force-scalar` cargo feature selects the scalar backend on any
+//! architecture so they can be cross-checked on the same machine.
 //!
 //! Hard rules the API upholds:
 //!
@@ -26,9 +27,42 @@ mod neon;
 #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
 use neon as backend;
 
-#[cfg(not(all(target_arch = "aarch64", not(feature = "force-scalar"))))]
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma",
+    not(feature = "force-scalar")
+))]
+mod avx2;
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma",
+    not(feature = "force-scalar")
+))]
+use avx2 as backend;
+
+// Everything else — x86_64 without those target features included, so a build
+// for a pre-AVX2 CPU still works — falls back to the scalar backend.
+#[cfg(not(any(
+    all(target_arch = "aarch64", not(feature = "force-scalar")),
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma",
+        not(feature = "force-scalar")
+    )
+)))]
 mod scalar;
-#[cfg(not(all(target_arch = "aarch64", not(feature = "force-scalar"))))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", not(feature = "force-scalar")),
+    all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma",
+        not(feature = "force-scalar")
+    )
+)))]
 use scalar as backend;
 
 pub use aligned::AlignedVec;

@@ -1,0 +1,9 @@
+# x86_64 builds target AVX2 + FMA, which is what `src/simd/avx2.rs` is gated on:
+# without these flags an x86_64 build silently falls back to the scalar backend.
+# Every Intel/AMD CPU from ~2013 (Haswell / Excavator) onwards has both.
+#
+# On an older x86 CPU, build with `--features force-scalar` (or strip these
+# rustflags); otherwise the binary will fault on its first AVX2 instruction —
+# `run_cli` checks for the features at startup and errors out first.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+avx2,+fma"]
