@@ -318,6 +318,22 @@ impl ColBand {
         self.planes.len()
     }
 
+    /// Unsharp-mask this band in place, all channels, by `amount`.
+    ///
+    /// Kept on [`ColBand`] rather than exposing `planes`: the mask is the only
+    /// thing that ever mutates a resampled band, and the invariant it has to
+    /// respect — image data is `[0, width)` of each `stride`-float row, the rest
+    /// is padding that must stay zero — is this type's, not its caller's.
+    pub fn sharpen(&mut self, amount: f32) {
+        super::sharpen::unsharp(
+            &mut self.planes,
+            self.width,
+            self.height,
+            self.stride,
+            amount,
+        );
+    }
+
     /// Row `y` of channel `channel`, `width` samples (padding excluded).
     #[inline]
     pub fn row(&self, channel: usize, y: usize) -> &[f32] {

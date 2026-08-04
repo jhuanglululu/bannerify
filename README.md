@@ -54,6 +54,10 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   scores exactly, by perceptual (OKLab) distance, instead of by the cheap
   approximation (default `20`). Raise it for a slightly closer match,
   lower it (or `0`) for speed.
+- `--sharpen AMOUNT` — unsharp mask on the resampled target before the
+  solver sees it (default `0.5`). The solver minimises squared error, which
+  averages detail into a blur; this pushes back. Raise it for crisper
+  edges, `0` to turn it off.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds
   and keep the best result.
 - `-L, --layer-range MIN MAX` — how many pattern layers a banner may use

@@ -26,7 +26,7 @@ use crate::logger::{error_out, info};
 use crate::memory;
 use crate::pattern;
 use crate::preview;
-use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
+use crate::resample::{InterleavedU8, Plan, PlanarU8, SHARPEN_RADIUS, Window};
 use crate::solver::block::{BlockScratch, match_cell};
 use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
@@ -34,17 +34,25 @@ use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace};
 
 const CHANNELS: usize = 3;
 
+/// Extra target columns resampled on each side of a band when sharpening, so
+/// the unsharp mask never has to invent neighbours at the band's own edges.
+///
+/// Taken from the mask's kernel radius rather than restated, so widening the
+/// kernel widens the halo with it instead of quietly reopening the seam.
+const SHARPEN_HALO: usize = SHARPEN_RADIUS;
+
 // ---------------------------------------------------------------- work items
 
 /// Where one column item's resampled pixels land in the wall canvas.
+///
+/// Origin only — the extent is `target_cols.len()` wide and the full output
+/// height, and the resampled band may be wider still (the sharpen halo).
 #[derive(Clone, Copy, Debug)]
 struct Rect {
     /// Left edge, in canvas pixels.
     x: usize,
     /// Top edge, in canvas pixels.
     y: usize,
-    /// Width in pixels.
-    width: usize,
 }
 
 /// One unit of parallel work: one block column of the wall.
@@ -64,6 +72,9 @@ struct ColItem {
     dest_rect: Rect,
     /// Columns of the resample target this item covers.
     target_cols: Range<usize>,
+    /// Columns actually resampled: [`ColItem::target_cols`] plus the sharpen
+    /// halo (see [`col_items`]), and equal to it when sharpening is off.
+    band_cols: Range<usize>,
 }
 
 /// Everything a column item borrows.
@@ -77,6 +88,8 @@ struct ColContext<'a> {
     layers: &'a LayerGrid,
     /// Largest budget in the grid — the size every workspace is built for.
     max_layers: usize,
+    /// Unsharp-mask strength for each resampled band; `0.0` skips the pass.
+    sharpen: f32,
     /// The solver stages' shared configuration.
     solve: SolveCfg<'a>,
     /// Perturbation RNG seed; each item derives its stream from it and its
@@ -105,8 +118,18 @@ struct ColOutcome {
     stages: Stages,
 }
 
-fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
+/// Cut the wall into one item per block column.
+///
+/// `sharpen` widens each item's *resampled* band by [`SHARPEN_HALO`] columns on
+/// each side (clamped to the target), because the unsharp mask is a convolution
+/// and a band that only holds its own columns would have to invent neighbours at
+/// its edges — replicated ones, differing from what the neighbouring band
+/// invents, which is a visible seam on every block boundary. The halo columns
+/// are blur support only: the solver and the block matcher address the band by
+/// wall coordinate through [`BandView`], so they never see them.
+fn col_items(layout: &Layout, plan: &Plan, sharpen: f32) -> Vec<ColItem> {
     let (ox, oy) = layout.origin;
+    let halo = if sharpen > 0.0 { SHARPEN_HALO } else { 0 };
     (0..layout.columns)
         .map(|col| {
             let strip_cols = col * BLOCK_SIDE..(col + 1) * BLOCK_SIDE;
@@ -116,7 +139,9 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
             let lo = strip_cols.start.clamp(ox, ox + layout.target_width);
             let hi = strip_cols.end.clamp(ox, ox + layout.target_width);
             let target_cols = (lo - ox)..(hi - ox);
-            let (x0, x1) = plan.src_cols(&target_cols);
+            let band_cols = target_cols.start.saturating_sub(halo)
+                ..(target_cols.end + halo).min(layout.target_width);
+            let (x0, x1) = plan.src_cols(&band_cols);
             ColItem {
                 col,
                 src_rect: Window {
@@ -125,12 +150,9 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
                     x1,
                     y1: layout.window.y1,
                 },
-                dest_rect: Rect {
-                    x: lo,
-                    y: oy,
-                    width: target_cols.len(),
-                },
+                dest_rect: Rect { x: lo, y: oy },
                 target_cols,
+                band_cols,
             }
         })
         .collect()
@@ -155,15 +177,22 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
     // when `--fill` leaves this column entirely padding.
     let t = Instant::now();
     let band = (!item.target_cols.is_empty()).then(|| {
-        ctx.plan
-            .band((item.src_rect.x0, item.src_rect.x1), item.dest_rect.width)
-            .resample(ctx.source)
+        let mut band = ctx
+            .plan
+            .band((item.src_rect.x0, item.src_rect.x1), item.band_cols.len())
+            .resample(ctx.source);
+        band.sharpen(ctx.sharpen);
+        band
     });
     let resample = t.elapsed();
 
+    // The band starts at `band_cols.start`, which the sharpen halo may have
+    // pulled left of the item's own first column — so the view's origin is the
+    // canvas position of the item's first column, shifted back by however much
+    // of the halo the target's left edge actually allowed.
     let view = BandView::new(
         band.as_ref(),
-        item.dest_rect.x,
+        item.dest_rect.x - (item.target_cols.start - item.band_cols.start),
         item.dest_rect.y,
         ctx.layout.pad.unwrap_or([0; CHANNELS]),
     );
@@ -344,7 +373,7 @@ fn run(config: &Config) {
         layout.target_width,
         layout.target_height,
     );
-    let items = col_items(&layout, &plan);
+    let items = col_items(&layout, &plan, config.sharpen);
     let (patterns, blocks) = rayon::join(
         || pattern::load(&config.exclude_patterns),
         || block::load(&config.exclude_blocks),
@@ -401,6 +430,7 @@ fn run(config: &Config) {
         blocks: &blocks,
         layers: &layers,
         max_layers,
+        sharpen: config.sharpen,
         solve: SolveCfg {
             patterns: &patterns,
             refinement: &config.refinement,

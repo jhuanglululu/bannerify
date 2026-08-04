@@ -52,6 +52,12 @@ layer_range = [4, 6]
 # any zero disables it
 # perturbations = [0, 0, 0]
 
+# unsharp mask strength applied to the resized image before it is solved against
+# the solver minimises squared error, which averages detail away into a blur;
+# this leans against that. must be a finite number, 0 or greater
+# 0 turns the pass off entirely
+sharpen = 0.5
+
 # REMOVED in phase 5: `lab_refine`.
 # The separate perceptual (OKLab) pass is gone; exact perceptual scoring now
 # happens inside refinement, on every window step, and is tuned by
