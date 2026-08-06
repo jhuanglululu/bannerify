@@ -405,6 +405,7 @@ fn run(config: &Config) {
             patterns: &patterns,
             refinement: &config.refinement,
             perturbations: config.perturbations,
+            feature_weight: config.feature_weight,
         },
         seed: config.seed,
     };
@@ -575,6 +576,7 @@ fn run(config: &Config) {
         debug_line("    refine (cpu)", stages.refine, None);
         debug_line("    perturb (cpu)", stages.perturb, None);
         debug_line("    oklab (cpu)", stages.oklab, None);
+        debug_line("    feature (cpu)", stages.feature, None);
         debug_line(
             "interleave",
             t_interleave,
@@ -609,14 +611,14 @@ fn run(config: &Config) {
         debug_line("html", t_html, Some(memory::format_bytes(page.len())));
         debug_line("total", started.elapsed(), None);
         println!(
-            "{}: {:<16} {:.3} OKLab dE per cell, {:.4} mean OKLab dE per pixel",
+            "{}: {:<18} {:.3} OKLab dE per cell, {:.4} mean OKLab dE per pixel",
             "debug".blue().bold(),
             "error",
             mean_err,
             total_lab / n_cells as f64
         );
         println!(
-            "{}: {:<16} peak {}, still live {}",
+            "{}: {:<18} peak {}, still live {}",
             "debug".blue().bold(),
             "memory",
             memory::format_bytes(memory::peak_bytes()),
@@ -649,7 +651,7 @@ fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
 fn debug_line(stage: &str, d: Duration, note: Option<String>) {
     let note = note.map(|n| format!("   {n}")).unwrap_or_default();
     println!(
-        "{}: {:<16} {:>9.3} s{}",
+        "{}: {:<18} {:>9.3} s{}",
         "debug".blue().bold(),
         stage,
         d.as_secs_f64(),

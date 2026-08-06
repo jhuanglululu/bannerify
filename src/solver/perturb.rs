@@ -49,11 +49,15 @@ impl Rng {
 
 /// Run the perturbation rounds, leaving `solution` the best found and the
 /// prefix chain consistent with it.
+// Everything here is forwarded to `refine`, which needs all of it; bundling the
+// arguments into a struct would only move the same list one level up.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn rounds(
     ws: &mut Workspace,
     solution: &mut Solution,
     (top_n, duplicates, rounds): (usize, usize, usize),
     cfg: &RefinementConfig,
+    lambda: f32,
     alphas: &[Plane],
     n: usize,
     rng: &mut Rng,
@@ -83,7 +87,7 @@ pub(super) fn rounds(
         // The re-refine is the whole point — the kick alone almost never
         // improves anything.
         for trial in &mut trials {
-            refine::refine(ws, trial, cfg, alphas, n);
+            refine::refine(ws, trial, cfg, lambda, alphas, n);
         }
 
         for trial in trials.drain(..) {

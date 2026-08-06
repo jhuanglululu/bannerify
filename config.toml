@@ -52,6 +52,15 @@ layer_range = [4, 6]
 # any zero disables it
 # perturbations = [0, 0, 0]
 
+# how hard the solver is pulled towards clean, flat dye colors
+# every cell is also fitted by an idealised 2-layer banner drawn in pure dye
+# colors, and this weighs that fit against the real pixels: 0 ignores it
+# entirely, 1 weighs it as heavily as the target itself
+# raise it if flat areas and logos come out muddy, lower it for photographs
+# (A/B'd over 0/0.25/0.5/1.0: 0.5 cleans flat art decisively; 1.0 washes out
+#  gradients, so prefer 0-0.25 for photographic targets)
+feature_weight = 0.5
+
 # REMOVED in phase 5: `lab_refine`.
 # The separate perceptual (OKLab) pass is gone; exact perceptual scoring now
 # happens inside refinement, on every window step, and is tuned by

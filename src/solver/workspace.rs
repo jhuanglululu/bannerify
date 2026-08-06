@@ -18,7 +18,7 @@ use crate::simd::{Chunk, F32s, LANES};
 use crate::zip;
 
 use super::perturb::Rng;
-use super::{greedy, perturb, refine};
+use super::{feature, greedy, perturb, refine};
 
 /// One patch plane: always the full top-row patch, whatever the row.
 pub type Plane = Chunk<TOP_HW>;
@@ -51,9 +51,14 @@ pub struct Solution {
     /// `(pattern index, dye index)` per layer, in application order.
     pub layers: Vec<(usize, usize)>,
     /// OKLab `Σ ΔE` of the final composite against the target patch, summed
-    /// over the solved pixels — not normalised. This is the quantity every
-    /// stage from refinement on optimises and compares on
+    /// over the solved pixels — not normalised
     /// ([`super::refine::lab_error`] explains why it is not squared).
+    ///
+    /// Always the **pure target** error as it leaves [`Workspace::solve`], even
+    /// when the solver ranked on a feature-regularised one
+    /// ([`super::refine::ranking_error`]): the readout has to mean the same
+    /// thing at every `--feature-weight` for the numbers to be comparable.
+    /// Inside the solve it carries whichever error that stage ranks on.
     pub error: f32,
     /// [`Solution::error`] per pixel — the number that reads directly as a
     /// colour difference, and what `--debug` reports.
@@ -132,6 +137,9 @@ pub struct Stages {
     /// Per-cell OKLab bookkeeping: converting the target and the final ΔE
     /// readout. The exact scoring itself is counted under refinement.
     pub oklab: Duration,
+    /// Feature-map construction: the snap, the pattern-pair search and the
+    /// blend. Zero when `--feature-weight` is `0`.
+    pub feature: Duration,
 }
 
 impl Stages {
@@ -140,6 +148,7 @@ impl Stages {
         self.refine += other.refine;
         self.perturb += other.perturb;
         self.oklab += other.oklab;
+        self.feature += other.feature;
     }
 }
 
@@ -151,6 +160,9 @@ pub struct SolveCfg<'a> {
     pub refinement: &'a RefinementConfig,
     /// `(top_n, duplicates, rounds)`, or `None` when disabled.
     pub perturbations: Option<(usize, usize, usize)>,
+    /// Weight of the feature-map term, `--feature-weight`; `0` skips the whole
+    /// pass ([`super::feature`]).
+    pub feature_weight: f32,
 }
 
 /// Reusable solver buffers for one work item.
@@ -162,6 +174,12 @@ pub struct Workspace {
     /// Layers in the last [`Workspace::solve`] — which prefix is the composite.
     depth: usize,
     /// The cell's target pixels, planar, filled by the caller before `solve`.
+    ///
+    /// **Not pure after `solve` with a non-zero feature weight**: the closed-form
+    /// rungs score against a blend of the target and the feature map, and that
+    /// blend is written here, over the gathered pixels
+    /// ([`super::feature::build`] explains why in place). Read the OKLab
+    /// [`Workspace::lab_target`] for the real target — it is converted first.
     pub(super) target: [Plane; 3],
     /// Composite after `i` layers; `prefixes[0]` is the flat base colour.
     pub(super) prefixes: Vec<[Plane; 3]>,
@@ -173,6 +191,13 @@ pub struct Workspace {
     pub(super) cand: [Plane; 3],
     /// The target converted to OKLab, once per cell.
     pub(super) lab_target: [Plane; 3],
+    /// The cell's feature map — the idealised two-layer banner every rung is
+    /// pulled towards ([`super::feature`]) — composited in sRGB.
+    pub(super) feature: [Plane; 3],
+    /// [`Workspace::feature`] in OKLab, for the exact rung.
+    pub(super) lab_feature: [Plane; 3],
+    /// Scratch for building the feature map.
+    pub(super) feat: feature::Buffers,
     /// Perturbation beam: `(error, solution)`, kept sorted ascending.
     pub(super) pool: Vec<(f32, Solution)>,
     /// Refinement's exact-scoring shortlist: the `exact_candidates` best
@@ -202,6 +227,9 @@ impl Workspace {
             beam: Beam::new(candidates.max(1)),
             cand: [Chunk::zeroed(); 3],
             lab_target: [Chunk::zeroed(); 3],
+            feature: [Chunk::zeroed(); 3],
+            lab_feature: [Chunk::zeroed(); 3],
+            feat: feature::Buffers::default(),
             shortlist: Vec::new(),
             pool: Vec::new(),
             trials: Vec::new(),
@@ -229,14 +257,23 @@ impl Workspace {
         &self.prefixes[self.depth]
     }
 
-    /// Solve the patch currently in [`Workspace::target_mut`]: greedy fill,
-    /// windowed refinement, perturbation rounds — each stage skipped when its
-    /// configuration disables it.
+    /// Solve the patch currently in [`Workspace::target_mut`] in two stages:
+    /// stage 1 is greedy fill + windowed refinement (the initial solve);
+    /// stage 2 is perturbation rounds, each trial re-refined by the same
+    /// windowed refinement. Either stage's re-refine/perturb sub-step is
+    /// skipped when its configuration disables it.
     ///
     /// The target is converted to OKLab first, because from refinement on every
     /// comparison is an exact OKLab one. The greedy fill is the exception on
     /// purpose: it is a coarse initialiser, so it stays closed-form sRGB and
     /// its `error` is overwritten below.
+    ///
+    /// With a non-zero feature weight the feature map is built next — before the
+    /// solve, after the OKLab conversion — and it *blends the sRGB target planes
+    /// in place*, so everything downstream of it that reads
+    /// [`Workspace::target`] is scoring the regularised target on purpose. The
+    /// error returned at the end is re-measured against the pure OKLab target,
+    /// so [`Solution::error`] means the same thing at every λ.
     pub fn solve(&mut self, n_layers: usize, cfg: &SolveCfg<'_>, rng: &mut Rng) -> Solution {
         self.depth = n_layers;
 
@@ -250,6 +287,12 @@ impl Workspace {
         let t = std::time::Instant::now();
         refine::convert_target(&self.target, &mut self.lab_target, self.off);
         self.stages.oklab += t.elapsed();
+
+        if cfg.feature_weight > 0.0 {
+            let t = std::time::Instant::now();
+            feature::build(self, alphas, cfg.feature_weight);
+            self.stages.feature += t.elapsed();
+        }
 
         let t = std::time::Instant::now();
         let mut solution = greedy::fill(
@@ -265,7 +308,14 @@ impl Workspace {
 
         if cfg.refinement.refinement_pass > 0 && n_layers > 0 {
             let t = std::time::Instant::now();
-            refine::refine(self, &mut solution, cfg.refinement, alphas, n_layers);
+            refine::refine(
+                self,
+                &mut solution,
+                cfg.refinement,
+                cfg.feature_weight,
+                alphas,
+                n_layers,
+            );
             self.stages.refine += t.elapsed();
         }
 
@@ -276,6 +326,7 @@ impl Workspace {
                 &mut solution,
                 (top_n, duplicates, rounds),
                 cfg.refinement,
+                cfg.feature_weight,
                 alphas,
                 n_layers,
                 rng,
@@ -314,5 +365,165 @@ pub(super) fn rebuild_prefixes(
         let (done, rest) = prefixes.split_at_mut(layer + 1);
         let (p, c) = solution.layers[layer];
         greedy::build_prefix(&done[layer], &mut rest[0], &alphas[p], c, off);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::oklab::srgb_to_oklab;
+    use crate::pattern::{Patterns, load};
+    use crate::simd::F32s;
+
+    const LAYERS: usize = 4;
+
+    fn config<'a>(patterns: &'a Patterns, refinement: &'a RefinementConfig) -> SolveCfg<'a> {
+        SolveCfg {
+            patterns,
+            refinement,
+            perturbations: Some((2, 2, 1)),
+            feature_weight: 0.0,
+        }
+    }
+
+    fn refinement() -> RefinementConfig {
+        RefinementConfig {
+            refinement_pass: 2,
+            window_size: 2,
+            error_threshold: 0.7,
+            refinement_candidate: 5,
+            exact_candidates: 20,
+        }
+    }
+
+    /// A patch with structure in it: two colour regions plus a ramp, so the
+    /// solver has something to actually choose patterns for.
+    fn target(i: usize) -> [f32; 3] {
+        let (x, y) = ((i % 20) as f32, (i / 20) as f32);
+        if x < 7.0 {
+            [200.0 - 2.0 * y, 40.0 + 3.0 * x, 60.0]
+        } else {
+            [20.0 + x, 90.0 + 2.0 * y, 220.0 - 4.0 * x]
+        }
+    }
+
+    fn workspace(row: usize) -> Workspace {
+        let mut ws = Workspace::new(LAYERS, 5);
+        ws.begin(row);
+        for (i, px) in (0..TOP_HW).map(|i| (i, target(i))) {
+            for (ch, plane) in ws.target_mut().iter_mut().enumerate() {
+                plane[i] = px[ch];
+            }
+        }
+        ws
+    }
+
+    /// With `--feature-weight 0` the solve must be the one that existed before
+    /// the feature map did. The reference here is that solve, spelled out: OKLab
+    /// conversion, greedy fill, refinement, perturbation, pure-target readout —
+    /// and no feature map anywhere. Anything that leaks the new path into λ = 0
+    /// (a blend applied, a feature term in the ranking, the pass running at all)
+    /// moves one of the two and not the other.
+    #[test]
+    fn a_zero_feature_weight_solves_exactly_as_the_pre_feature_map_solver() {
+        let patterns = load(&HashSet::new());
+        let refinement = refinement();
+        let cfg = config(&patterns, &refinement);
+
+        let mut ws = workspace(0);
+        let solution = ws.solve(LAYERS, &cfg, &mut Rng::new(0, 0));
+
+        let mut reference = workspace(0);
+        let mut rng = Rng::new(0, 0);
+        let expected = {
+            let ws = &mut reference;
+            refine::convert_target(&ws.target, &mut ws.lab_target, ws.off);
+            let mut solution = greedy::fill(
+                &ws.target,
+                &mut ws.prefixes,
+                LAYERS,
+                &patterns.top,
+                &patterns.top_alpha2,
+                ws.off,
+                ws.hw,
+            );
+            refine::refine(ws, &mut solution, &refinement, 0.0, &patterns.top, LAYERS);
+            perturb::rounds(
+                ws,
+                &mut solution,
+                (2, 2, 1),
+                &refinement,
+                0.0,
+                &patterns.top,
+                LAYERS,
+                &mut rng,
+            );
+            solution.error = refine::lab_error(&ws.prefixes[LAYERS], &ws.lab_target, ws.off);
+            solution
+        };
+
+        assert_eq!(solution.base, expected.base);
+        assert_eq!(solution.layers, expected.layers);
+        assert_eq!(solution.error.to_bits(), expected.error.to_bits());
+
+        // The target planes are the second observable: at λ = 0 nothing blends
+        // them, so they still hold what the caller gathered.
+        for (ch, plane) in ws.target.iter().enumerate() {
+            for i in 0..TOP_HW {
+                assert_eq!(plane[i], target(i)[ch], "pixel {i}, channel {ch}");
+            }
+        }
+    }
+
+    /// The reported error stays comparable across feature weights: whatever the
+    /// solver ranked on, what comes back is `Σ ΔE` of the final composite
+    /// against the *pure* target — recomputed here pixel by pixel, from the
+    /// patch as it was handed in, without touching the solver's kernels.
+    #[test]
+    fn the_reported_error_is_pure_target_delta_e_at_a_non_zero_weight() {
+        let patterns = load(&HashSet::new());
+        let refinement = refinement();
+        let cfg = SolveCfg {
+            feature_weight: 0.75,
+            ..config(&patterns, &refinement)
+        };
+
+        let mut ws = workspace(1);
+        let solution = ws.solve(LAYERS, &cfg, &mut Rng::new(0, 0));
+
+        let lab = |px: [f32; 3]| {
+            let (l, a, b) = srgb_to_oklab(
+                F32s::splat(px[0]),
+                F32s::splat(px[1]),
+                F32s::splat(px[2]),
+            );
+            [l.to_array()[0], a.to_array()[0], b.to_array()[0]]
+        };
+
+        let composite = ws.composite();
+        let mut sum = 0.0_f64;
+        for (i, _) in composite[0].iter().enumerate().skip(TOP_HW - ws.hw) {
+            let got = lab([composite[0][i], composite[1][i], composite[2][i]]);
+            let want = lab(target(i));
+            let d: f32 = got
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
+            sum += f64::from(d);
+        }
+
+        let reported = f64::from(solution.error);
+        assert!(
+            (reported - sum).abs() < 1e-3 * sum,
+            "reported {reported}, pure-target {sum}"
+        );
+        assert!(
+            (f64::from(solution.lab_error) - sum / f64::from(ws.hw as f32)).abs() < 1e-6,
+            "lab_error is not the per-pixel mean of error"
+        );
     }
 }

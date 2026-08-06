@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod cell;
+pub mod feature;
 pub mod greedy;
 pub mod perturb;
 pub mod refine;

@@ -54,6 +54,11 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   scores exactly, by perceptual (OKLab) distance, instead of by the cheap
   approximation (default `20`). Raise it for a slightly closer match,
   lower it (or `0`) for speed.
+- `-F, --feature-weight λ` — how hard the solver is pulled towards clean
+  flat colors and crisp edges (default `0.5`). Every banner is also fitted
+  by an idealised two-layer banner in pure dye colors, and λ weighs that
+  fit against the raw pixels. Raise it when logos and flat areas come out
+  muddy, lower it (or `0`) for photographs.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds
   and keep the best result.
 - `-L, --layer-range MIN MAX` — how many pattern layers a banner may use

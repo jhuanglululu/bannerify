@@ -97,6 +97,14 @@ pub struct Args {
     #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
 
+    /// Weight of the feature-map term: [default: 0.5]. Every cell is also
+    /// fitted by an idealised 2-layer banner in pure dye colors, and the solver
+    /// is pulled towards it by this weight -- cleaner flat areas and crisper
+    /// edges, at the cost of some pixel-level accuracy. 0 disables it
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'F', long, value_name = "WEIGHT")]
+    pub feature_weight: Option<f32>,
+
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]

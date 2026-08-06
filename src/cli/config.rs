@@ -16,6 +16,10 @@ use crate::logger::error_out;
 
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
 
+/// Provisional: picked before the A/B of `context/plans/6-feature-map.md`
+/// step 6 has been run.
+const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
+
 /// The validated, merged configuration the pipeline runs on.
 pub struct Config {
     pub input: PathBuf,
@@ -34,6 +38,9 @@ pub struct Config {
     /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
     pub refinement: RefinementConfig,
+    /// Weight of the feature-map term in the solver's error, `0` to disable it
+    /// entirely ([`crate::solver::feature`]).
+    pub feature_weight: f32,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
     pub seed: u64,
@@ -68,6 +75,7 @@ pub struct ConfigToml {
     pub error_threshold: Option<f32>,
     pub refinement_candidate: Option<usize>,
     pub exact_candidates: Option<usize>,
+    pub feature_weight: Option<f32>,
     pub perturbations: Option<Vec<usize>>,
     pub seed: Option<u64>,
     pub preview: Option<usize>,
@@ -128,6 +136,11 @@ impl From<Args> for Config {
                     .or(config.exact_candidates)
                     .unwrap_or(DEFAULT_EXACT_CANDIDATES),
             },
+            feature_weight: parse_feature_weight(
+                &config_path,
+                args.feature_weight,
+                config.feature_weight,
+            ),
             perturbations: parse_perturbation(
                 &config_path,
                 &args.perturbations,
@@ -383,6 +396,32 @@ fn parse_error_threshold(config_path: &str, threshold: Option<f32>, config: Opti
     } else {
         0.7
     }
+}
+
+/// The feature weight is a ratio, not a bounded fraction: `0` disables the term
+/// and `1` weighs the idealised banner exactly as heavily as the real target, so
+/// there is a sensible reason to go above 1 and no defensible place to cap it.
+/// Only negative and non-finite values are refused.
+fn parse_feature_weight(config_path: &str, weight: Option<f32>, config: Option<f32>) -> f32 {
+    let (value, flag, source) = match (weight, config) {
+        (Some(w), _) => (w, "--feature-weight".to_string(), String::new()),
+        (None, Some(w)) => (
+            w,
+            "feature_weight".to_string(),
+            format!(" in '{}'", config_path.yellow()),
+        ),
+        (None, None) => return DEFAULT_FEATURE_WEIGHT,
+    };
+
+    if !value.is_finite() || value < 0.0 {
+        error_out!(
+            "'{}'{} needs to be a finite value of at least '{}'",
+            flag.yellow(),
+            source,
+            "0.0".yellow()
+        );
+    }
+    value
 }
 
 fn parse_perturbation(

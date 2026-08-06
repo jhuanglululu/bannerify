@@ -68,6 +68,24 @@
 //! at `N = 8` beats a flat one at `N = 40` for a fifth of the exact
 //! evaluations.
 //!
+//! ## The feature term
+//!
+//! With `--feature-weight λ` above zero both rungs also score the cell's feature
+//! map ([`crate::solver::feature`]), and they do it in different places:
+//!
+//! - Rung 1 sees nothing at all. `Σ w·(c−t)² + λ·Σ w·(c−f)²` is, up to a
+//!   dye-independent constant, `(1+λ)·Σ w·(c−b)²` with the blended target
+//!   `b = (t + λ·f)/(1+λ)`, so the feature term is folded into
+//!   [`Ctx::target`] before refinement starts and the moments machinery is
+//!   untouched.
+//! - Rung 2 adds the term explicitly, in [`ranking_error`]: OKLab distances do
+//!   not expand like that.
+//!
+//! `error_threshold` still compares like with like — a `best` list is filled by
+//! exactly one of the two rungs, never a mix — and the error the *solve* finally
+//! reports is re-measured against the pure target ([`lab_error`]) so quality
+//! numbers stay comparable across λ.
+//!
 //! The base dye is re-optimised at the end of every pass from `suffixes[0]`
 //! (with `α ≡ 1`), and the whole prefix chain is then rebuilt, so `prefixes[n]`
 //! is the composite the reported error is measured on.
@@ -93,10 +111,17 @@ const NO_CAND: Scored = (f32::INFINITY, 0, 0, 0);
 struct Ctx<'a> {
     /// Lane offset of the cell's patch.
     off: usize,
-    /// The cell's target planes.
+    /// The cell's target planes — *blended* with the feature map when the
+    /// feature weight is non-zero ([`crate::solver::feature`]), which is what
+    /// makes the closed form below score the feature term for free.
     target: &'a [Plane; 3],
-    /// The cell's target planes, in OKLab.
+    /// The cell's target planes, in OKLab. Never blended: the exact rung scores
+    /// the two terms separately.
     lab_target: &'a [Plane; 3],
+    /// The cell's feature map, in OKLab. Meaningful only when `lambda > 0`.
+    lab_feature: &'a [Plane; 3],
+    /// Weight of the feature term in the ranking error; `0` disables it.
+    lambda: f32,
     /// The pattern table.
     alphas: &'a [Plane],
     /// Beam width, window length, pruning threshold, pass count, exact top-N.
@@ -132,6 +157,7 @@ pub(super) fn refine(
     ws: &mut Workspace,
     solution: &mut Solution,
     cfg: &RefinementConfig,
+    lambda: f32,
     alphas: &[Plane],
     n: usize,
 ) {
@@ -139,6 +165,7 @@ pub(super) fn refine(
         off,
         target,
         lab_target,
+        lab_feature,
         prefixes,
         suffixes,
         beam,
@@ -152,6 +179,8 @@ pub(super) fn refine(
         off,
         target,
         lab_target,
+        lab_feature,
+        lambda,
         alphas,
         cfg,
     };
@@ -194,7 +223,7 @@ pub(super) fn refine(
         }
     }
 
-    solution.error = lab_error(&prefixes[n], lab_target, off);
+    solution.error = ranking_error(&prefixes[n], lab_target, lab_feature, lambda, off);
 }
 
 /// Re-choose up to `window_size` layers ending at `start_layer`, as a beam.
@@ -298,7 +327,12 @@ fn refine_window(
             );
             push_top(
                 best,
-                (lab_error(cand, ctx.lab_target, off), cand_idx, p_idx, c_idx),
+                (
+                    ranking_error(cand, ctx.lab_target, ctx.lab_feature, ctx.lambda, off),
+                    cand_idx,
+                    p_idx,
+                    c_idx,
+                ),
             );
         }
 
@@ -484,8 +518,52 @@ pub(super) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usi
     }
 }
 
-/// `Σ ΔE` between an sRGB composite and the OKLab target planes — the number
-/// the beam ranks on and [`Solution::error`] carries.
+/// The number the beam actually ranks on: `Σ ΔE(composite, target)` plus
+/// `λ · Σ ΔE(composite, feature)`.
+///
+/// One pass, not two calls to [`lab_error`]: the composite's OKLab conversion is
+/// the expensive part (a cube root per channel per lane) and both terms need the
+/// same one. Nine lane streams is past [`zip!`](crate::zip)'s arity, hence the
+/// indexed loop.
+///
+/// `λ = 0` returns [`lab_error`] itself, so a run without the feature map ranks
+/// on bit-identical numbers to one built before it existed.
+pub(super) fn ranking_error(
+    rgb: &[Plane; 3],
+    lab_target: &[Plane; 3],
+    lab_feature: &[Plane; 3],
+    lambda: f32,
+    off: usize,
+) -> f32 {
+    if lambda == 0.0 {
+        return lab_error(rgb, lab_target, off);
+    }
+
+    let lam = F32s::splat(lambda);
+    let rgb = [view(&rgb[0], off), view(&rgb[1], off), view(&rgb[2], off)];
+    let tar: [&[F32s]; 3] = std::array::from_fn(|ch| view(&lab_target[ch], off));
+    let fea: [&[F32s]; 3] = std::array::from_fn(|ch| view(&lab_feature[ch], off));
+
+    let mut acc = F32s::ZERO;
+    for i in 0..rgb[0].len() {
+        let lab = srgb_to_oklab(rgb[0][i], rgb[1][i], rgb[2][i]);
+        let target = delta_e(lab, (tar[0][i], tar[1][i], tar[2][i]));
+        let feature = delta_e(lab, (fea[0][i], fea[1][i], fea[2][i]));
+        acc += feature.mul_add(lam, target);
+    }
+    acc.hsum()
+}
+
+/// Euclidean distance between two OKLab lanes — a ΔE.
+#[inline]
+fn delta_e(a: (F32s, F32s, F32s), b: (F32s, F32s, F32s)) -> F32s {
+    let (dl, da, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    dl.mul_add(dl, da.mul_add(da, db * db)).sqrt()
+}
+
+/// `Σ ΔE` between an sRGB composite and the OKLab target planes — the **pure
+/// target** error, which is what [`Solution::error`] carries out of a solve and
+/// what `--debug` reports, whatever the feature weight is.
 ///
 /// Summed *un-squared*, deliberately. Minimising `Σ ΔE²` is a different problem
 /// and measurably the wrong one here: on great_wave at `--row 20` it reaches a
@@ -505,9 +583,7 @@ pub(super) fn lab_error(rgb: &[Plane; 3], lab_target: &[Plane; 3], off: usize) -
         view(&lab_target[1], off),
         view(&lab_target[2], off)
     ) {
-        let (l, a, b) = srgb_to_oklab(r, g, b);
-        let (dl, da, db) = (l - tl, a - ta, b - tb);
-        acc += dl.mul_add(dl, da.mul_add(da, db * db)).sqrt();
+        acc += delta_e(srgb_to_oklab(r, g, b), (tl, ta, tb));
     }
     acc.hsum()
 }
@@ -548,7 +624,7 @@ fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &m
                     *o = c.mul_add(mul, add);
                 }
             }
-            let err = lab_error(out, ctx.lab_target, off);
+            let err = ranking_error(out, ctx.lab_target, ctx.lab_feature, ctx.lambda, off);
             if err < min_err {
                 min_err = err;
                 best = c_idx;
