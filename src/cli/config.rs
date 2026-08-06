@@ -15,7 +15,6 @@ use crate::cli::Args;
 use crate::logger::error_out;
 
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
-const DEFAULT_SHARPEN: f32 = 0.5;
 
 /// The validated, merged configuration the pipeline runs on.
 pub struct Config {
@@ -34,9 +33,6 @@ pub struct Config {
     pub render: Option<PathBuf>,
     /// `(min, max)` layers per banner, spread by the variance pre-pass.
     pub n_layers: (usize, usize),
-    /// Unsharp-mask strength applied to the resampled target before it is
-    /// solved against; `0.0` disables the pass entirely.
-    pub sharpen: f32,
     pub refinement: RefinementConfig,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
@@ -67,7 +63,6 @@ pub struct ConfigToml {
     pub exclude_patterns: Option<Vec<String>>,
     pub exclude_blocks: Option<Vec<String>>,
     pub layer_range: Option<Vec<usize>>,
-    pub sharpen: Option<f32>,
     pub refinement_pass: Option<usize>,
     pub window_size: Option<usize>,
     pub error_threshold: Option<f32>,
@@ -111,7 +106,6 @@ impl From<Args> for Config {
             preview: parse_preview(args.preview.or(config.preview)),
             render: args.render.or(config.render),
             n_layers,
-            sharpen: parse_sharpen(&config_path, args.sharpen, config.sharpen),
             refinement: RefinementConfig {
                 refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
                 window_size: parse_window_size(
@@ -388,39 +382,6 @@ fn parse_error_threshold(config_path: &str, threshold: Option<f32>, config: Opti
         thresh
     } else {
         0.7
-    }
-}
-
-/// A negative amount would be a *blur* — the exact opposite of what the flag is
-/// for — so it is refused rather than quietly honoured.
-///
-/// Non-finite values are refused for a sharper reason: the mask multiplies the
-/// whole target by the amount, and a NaN or infinite target poisons every
-/// comparison in the solver (every `<` is false, so candidate 0 wins in every
-/// cell). The wall would come out as a handful of colours with no error message
-/// at all, so the check belongs here, at the one place the number enters.
-fn parse_sharpen(config_path: &str, sharpen: Option<f32>, config: Option<f32>) -> f32 {
-    if let Some(amount) = sharpen {
-        if !(amount.is_finite() && amount >= 0.0) {
-            error_out!(
-                "'{}' value needs to be a finite number of at least '{}'",
-                "--sharpen".yellow(),
-                "0.0".yellow()
-            );
-        }
-        amount
-    } else if let Some(amount) = config {
-        if !(amount.is_finite() && amount >= 0.0) {
-            error_out!(
-                "'{}' in '{}' needs to be a finite number of at least '{}'",
-                "sharpen".yellow(),
-                config_path.yellow(),
-                "0.0".yellow()
-            );
-        }
-        amount
-    } else {
-        DEFAULT_SHARPEN
     }
 }
 

@@ -97,13 +97,6 @@ pub struct Args {
     #[arg(short = 'p', long, num_args = 3, value_names = ["TOP_N", "DUPLICATES", "ROUNDS"])]
     pub perturbations: Vec<usize>,
 
-    /// Unsharp-mask strength applied to the resampled target before solving
-    /// [default: 0.5]; counters the solver's tendency to average detail away
-    /// into a blur. 0 disables the pass
-    #[arg(help_heading = "Generation")]
-    #[arg(long, value_name = "AMOUNT")]
-    pub sharpen: Option<f32>,
-
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]
