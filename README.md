@@ -86,7 +86,7 @@ bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debri
 ### Output extras
 
 - `--preview PIXELS` — largest dimension of the images embedded in the
-  HTML (default: the input image's size). Smaller = smaller HTML file.
+  HTML (default: the banner wall's size). Smaller = smaller HTML file.
 - `--render PATH` — also write the full-resolution wall render to a PNG on
   disk (not embedded).
 

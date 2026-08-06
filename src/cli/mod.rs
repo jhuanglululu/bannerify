@@ -48,8 +48,9 @@ pub struct Args {
     pub seed: Option<u64>,
 
     /// Largest dimension of the preview images embedded in the HTML
-    /// [default: the input image's own size]; never larger than the wall
-    /// itself, since upscaling a banner wall only inflates the file
+    /// [default: the banner wall's own size, no resize after the solve]; never
+    /// larger than the wall itself, since upscaling a banner wall only
+    /// inflates the file
     #[arg(long, value_name = "PIXELS")]
     pub preview: Option<usize>,
 

@@ -49,19 +49,16 @@ pub fn resize<S: Source + ?Sized>(src: &S, window: Window, width: usize, height:
     out
 }
 
-/// The preview's pixel size: the source's own dimensions by default, else the
-/// wall's aspect ratio scaled so its larger side is `max_dim`.
+/// The preview's pixel size: the wall canvas's own dimensions by default (no
+/// resize after the solve), else the wall's aspect ratio scaled so its larger
+/// side is `max_dim`.
 ///
 /// Either way the result is clamped to the wall canvas: upscaling a banner wall
 /// would only spend megabytes of base64 on interpolation of pixels the solver
 /// never had.
-pub fn dimensions(
-    max_dim: Option<usize>,
-    source: (usize, usize),
-    wall: (usize, usize),
-) -> (usize, usize) {
+pub fn dimensions(max_dim: Option<usize>, wall: (usize, usize)) -> (usize, usize) {
     let (w, h) = match max_dim {
-        None => source,
+        None => wall,
         Some(n) => {
             let n = n.max(1) as f64;
             let scale = n / wall.0.max(wall.1) as f64;

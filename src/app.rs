@@ -10,6 +10,7 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -26,6 +27,7 @@ use crate::logger::{error_out, info};
 use crate::memory;
 use crate::pattern;
 use crate::preview;
+use crate::progress::Progress;
 use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
 use crate::solver::block::{BlockScratch, match_cell};
 use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
@@ -82,6 +84,8 @@ struct ColContext<'a> {
     /// Perturbation RNG seed; each item derives its stream from it and its
     /// column index.
     seed: u64,
+    /// Solved-banner counter behind the progress bar; bumped once per cell.
+    progress: &'a AtomicUsize,
 }
 
 /// What one column item produces.
@@ -199,6 +203,7 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
         let solution = workspace.solve(ctx.layers.get(row, item.col), &ctx.solve, &mut rng);
         paint_cell(&mut strip, row, workspace.composite());
         cells.push(solution);
+        ctx.progress.fetch_add(1, Ordering::Relaxed);
     }
     let solve = t.elapsed();
 
@@ -380,20 +385,19 @@ fn run(config: &Config) {
     let t_variance = t.elapsed();
 
     info!(
-        "layers {}-{}: {}",
-        config.n_layers.0,
-        config.n_layers.1,
+        "layers {}",
         layers
             .histogram(config.n_layers)
             .iter()
             .enumerate()
-            .map(|(i, n)| format!("{}x{}", n, i + config.n_layers.0))
+            .map(|(i, n)| format!("{}: {}", i + config.n_layers.0, n))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(", ")
     );
 
     // ---- the pipeline: one flat par_iter over block columns ----------------
     let t = Instant::now();
+    let progress = Progress::start(layout.rows * layout.columns);
     let ctx = ColContext {
         source: &source,
         plan: &plan,
@@ -408,12 +412,14 @@ fn run(config: &Config) {
             feature_weight: config.feature_weight,
         },
         seed: config.seed,
+        progress: progress.counter(),
     };
     let outcomes: Vec<ColOutcome> = items
         .par_iter()
         .map(|item| render_column(&ctx, item))
         .collect();
     let t_pipeline = t.elapsed();
+    progress.finish();
 
     // ---- interleave the column strips into the canvas ----------------------
     let t = Instant::now();
@@ -457,11 +463,8 @@ fn run(config: &Config) {
 
     // ---- the two preview panes, both through our own resampler -------------
     let t = Instant::now();
-    let (pw, ph) = preview::dimensions(
-        config.preview,
-        (src_w, src_h),
-        (layout.wall_width, layout.wall_height),
-    );
+    let (pw, ph) =
+        preview::dimensions(config.preview, (layout.wall_width, layout.wall_height));
     let wall_src = InterleavedU8 {
         data: &canvas,
         width: layout.wall_width,
@@ -561,9 +564,9 @@ fn run(config: &Config) {
                 n_cells as f64 / t_pipeline.as_secs_f64()
             )),
         );
-        debug_line("  resample (cpu)", cpu_resample, None);
+        debug_line("  resample", cpu_resample, None);
         debug_line(
-            "  blocks (cpu)",
+            "  blocks",
             cpu_blocks,
             Some(format!(
                 "{} block cells x {} candidates",
@@ -571,12 +574,11 @@ fn run(config: &Config) {
                 blocks.len()
             )),
         );
-        debug_line("  solve (cpu)", cpu_solve, None);
-        debug_line("    greedy (cpu)", stages.greedy, None);
-        debug_line("    refine (cpu)", stages.refine, None);
-        debug_line("    perturb (cpu)", stages.perturb, None);
-        debug_line("    oklab (cpu)", stages.oklab, None);
-        debug_line("    feature (cpu)", stages.feature, None);
+        debug_line("  solve", cpu_solve, None);
+        debug_line("    feature", stages.feature, None);
+        debug_line("    greedy+refine", stages.greedy + stages.refine, None);
+        debug_line("    perturb+refine", stages.perturb, None);
+        debug_line("    oklab", stages.oklab, None);
         debug_line(
             "interleave",
             t_interleave,

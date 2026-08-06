@@ -15,6 +15,7 @@ pub mod memory;
 pub mod oklab;
 pub mod pattern;
 pub mod preview;
+pub mod progress;
 pub mod resample;
 pub mod simd;
 pub mod solver;

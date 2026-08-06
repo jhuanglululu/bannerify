@@ -13,8 +13,8 @@
 # * Output Options *
 
 # largest dimension of the preview images embedded in the HTML export
-# default is the input image's own size; either way it is never larger than
-# the banner wall itself
+# default is the banner wall's own size (no resize after the solve); either
+# way it is never larger than the banner wall itself
 # preview = 1200
 
 # also write the full-resolution banner wall to this PNG path
