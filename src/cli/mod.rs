@@ -4,6 +4,16 @@ use std::path::PathBuf;
 
 pub mod config;
 
+/// The artifact written to the output path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    #[default]
+    Html,
+    Schem,
+    Litematic,
+}
+
 /// `bannerify <input> <output> [options]`
 #[derive(clap::Parser)]
 #[command(
@@ -18,9 +28,12 @@ pub mod config;
 pub struct Args {
     /// Input image path
     pub input: PathBuf,
-    /// Output path: one self-contained HTML page with the preview, the crafting
-    /// guide and the .schem / .litematic downloads embedded in it
+    /// Output path, used exactly as supplied; contents are selected by --format
     pub output: PathBuf,
+
+    /// Output format [default: html, with preview, crafting guide and embedded schematics]
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Height of output in blocks (number of banner rows + 1)
     #[arg(short, long)]
@@ -51,6 +64,7 @@ pub struct Args {
     /// [default: the banner wall's own size, no resize after the solve]; never
     /// larger than the wall itself, since upscaling a banner wall only
     /// inflates the file
+    /// (has no effect for schem or litematic output)
     #[arg(long, value_name = "PIXELS")]
     pub preview: Option<usize>,
 

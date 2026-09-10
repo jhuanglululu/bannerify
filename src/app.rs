@@ -18,8 +18,8 @@ use colored::Colorize;
 use rayon::prelude::*;
 
 use crate::block::{self, Blocks};
-use crate::cli::Args;
 use crate::cli::config::Config;
+use crate::cli::{Args, OutputFormat};
 use crate::export::{Wall, html, schematic};
 use crate::geometry::BLOCK_SIDE;
 use crate::layout::Layout;
@@ -423,8 +423,12 @@ fn run(config: &Config) {
 
     // ---- interleave the column strips into the canvas ----------------------
     let t = Instant::now();
-    let mut canvas = vec![0u8; layout.wall_width * layout.wall_height * CHANNELS];
-    interleave(&mut canvas, &outcomes, layout.wall_width);
+    let needs_canvas = config.format == OutputFormat::Html || config.render.is_some();
+    let canvas = needs_canvas.then(|| {
+        let mut canvas = vec![0u8; layout.wall_width * layout.wall_height * CHANNELS];
+        interleave(&mut canvas, &outcomes, layout.wall_width);
+        canvas
+    });
     let t_interleave = t.elapsed();
 
     // Reduce the per-item stats now, so the outcomes can be consumed without
@@ -453,7 +457,12 @@ fn run(config: &Config) {
     // ---- the full-resolution wall, only when asked for by name -------------
     let t = Instant::now();
     if let Some(path) = &config.render {
-        write_png(path, &canvas, layout.wall_width, layout.wall_height);
+        write_png(
+            path,
+            canvas.as_ref().expect("render needs canvas"),
+            layout.wall_width,
+            layout.wall_height,
+        );
         info!(
             "wrote '{}': the full-resolution wall render",
             path.display().to_string().yellow()
@@ -461,35 +470,43 @@ fn run(config: &Config) {
     }
     let t_render = t.elapsed();
 
-    // ---- the two preview panes, both through our own resampler -------------
-    let t = Instant::now();
-    let (pw, ph) =
-        preview::dimensions(config.preview, (layout.wall_width, layout.wall_height));
-    let wall_src = InterleavedU8 {
-        data: &canvas,
-        width: layout.wall_width,
-        height: layout.wall_height,
-        channels: CHANNELS,
-    };
-    let (generated, original) = rayon::join(
-        || {
-            preview::resize(
-                &wall_src,
-                Window::full(layout.wall_width, layout.wall_height),
-                pw,
-                ph,
-            )
-        },
-        || preview::resize(&source, layout.window, pw, ph),
-    );
-    let t_preview = t.elapsed();
-    drop(canvas);
+    // HTML alone needs the comparison previews and their encoded images.
+    let previews = if config.format == OutputFormat::Html {
+        Some({
+            let t = Instant::now();
+            let (pw, ph) =
+                preview::dimensions(config.preview, (layout.wall_width, layout.wall_height));
+            let wall_src = InterleavedU8 {
+                data: canvas.as_ref().expect("HTML needs canvas"),
+                width: layout.wall_width,
+                height: layout.wall_height,
+                channels: CHANNELS,
+            };
+            let (generated, original) = rayon::join(
+                || {
+                    preview::resize(
+                        &wall_src,
+                        Window::full(layout.wall_width, layout.wall_height),
+                        pw,
+                        ph,
+                    )
+                },
+                || preview::resize(&source, layout.window, pw, ph),
+            );
+            let t_preview = t.elapsed();
+            drop(canvas);
 
-    let (preview_png, original_jpeg) = rayon::join(
-        || encode(&generated, pw, ph, image::ImageFormat::Png),
-        || encode(&original, pw, ph, image::ImageFormat::Jpeg),
-    );
-    let t_encode = t.elapsed() - t_preview;
+            let (preview_png, original_jpeg) = rayon::join(
+                || encode(&generated, pw, ph, image::ImageFormat::Png),
+                || encode(&original, pw, ph, image::ImageFormat::Jpeg),
+            );
+            let t_encode = t.elapsed() - t_preview;
+            (pw, ph, preview_png, original_jpeg, t_preview, t_encode)
+        })
+    } else {
+        drop(canvas);
+        None
+    };
 
     // ---- the exports -------------------------------------------------------
     let t = Instant::now();
@@ -509,44 +526,61 @@ fn run(config: &Config) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let (schem_bytes, litematic_bytes) = rayon::join(
-        || schematic::schem(&wall),
-        || schematic::litematic(&wall, &stem, now.as_millis() as i64),
-    );
+    let (schem_bytes, litematic_bytes) = match config.format {
+        OutputFormat::Html => rayon::join(
+            || schematic::schem(&wall),
+            || schematic::litematic(&wall, &stem, now.as_millis() as i64),
+        ),
+        OutputFormat::Schem => (schematic::schem(&wall), Vec::new()),
+        OutputFormat::Litematic => (
+            Vec::new(),
+            schematic::litematic(&wall, &stem, now.as_millis() as i64),
+        ),
+    };
     let t_schematic = t.elapsed();
 
     let t = Instant::now();
-    let input_name = config
-        .input
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| config.input.display().to_string());
-    let report = html::Report {
-        input: &input_name,
-        stem: &stem,
-        preview: &preview_png,
-        original: &original_jpeg,
-        original_mime: "image/jpeg",
-        size: (pw, ph),
-        litematic: &litematic_bytes,
-        schem: &schem_bytes,
+    let page = previews
+        .as_ref()
+        .map(|(pw, ph, preview_png, original_jpeg, _, _)| {
+            let input_name = config
+                .input
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| config.input.display().to_string());
+            let report = html::Report {
+                input: &input_name,
+                stem: &stem,
+                preview: preview_png,
+                original: original_jpeg,
+                original_mime: "image/jpeg",
+                size: (*pw, *ph),
+                litematic: &litematic_bytes,
+                schem: &schem_bytes,
+            };
+            html::page(&wall, &report)
+        });
+    let t_html = t.elapsed();
+    let (bytes, description) = match config.format {
+        OutputFormat::Html => (
+            page.as_ref().expect("HTML page").as_bytes(),
+            "HTML banner chart",
+        ),
+        OutputFormat::Schem => (schem_bytes.as_slice(), "Sponge schematic"),
+        OutputFormat::Litematic => (litematic_bytes.as_slice(), "Litematica schematic"),
     };
-    let page = html::page(&wall, &report);
-    std::fs::write(&config.output, page.as_bytes()).unwrap_or_else(|e| {
+    std::fs::write(&config.output, bytes).unwrap_or_else(|e| {
         error_out!(
             "could not write '{}': {}",
             config.output.display().to_string().yellow(),
             e.to_string().red()
         );
     });
-    let t_html = t.elapsed();
-
     info!(
-        "wrote '{}': the banner chart ({}), preview {}x{}",
+        "wrote '{}': {} ({})",
         config.output.display().to_string().yellow(),
-        memory::format_bytes(page.len()),
-        pw,
-        ph,
+        description,
+        memory::format_bytes(bytes.len()),
     );
 
     if config.debug {
@@ -579,38 +613,46 @@ fn run(config: &Config) {
         debug_line("    greedy+refine", stages.greedy + stages.refine, None);
         debug_line("    perturb+refine", stages.perturb, None);
         debug_line("    oklab", stages.oklab, None);
-        debug_line(
-            "interleave",
-            t_interleave,
-            Some(format!("{} column strips -> canvas", layout.columns)),
-        );
+        if needs_canvas {
+            debug_line(
+                "interleave",
+                t_interleave,
+                Some(format!("{} column strips -> canvas", layout.columns)),
+            );
+        }
         if config.render.is_some() {
             debug_line("render png", t_render, None);
         }
-        debug_line(
-            "preview",
-            t_preview,
-            Some(format!("wall + original -> {pw}x{ph}")),
-        );
-        debug_line(
-            "  encode",
-            t_encode,
-            Some(format!(
-                "{} + {}",
-                memory::format_bytes(preview_png.len()),
-                memory::format_bytes(original_jpeg.len())
-            )),
-        );
+        if let Some((pw, ph, preview_png, original_jpeg, t_preview, t_encode)) = &previews {
+            debug_line(
+                "preview",
+                *t_preview,
+                Some(format!("wall + original -> {pw}x{ph}")),
+            );
+            debug_line(
+                "  encode",
+                *t_encode,
+                Some(format!(
+                    "{} + {}",
+                    memory::format_bytes(preview_png.len()),
+                    memory::format_bytes(original_jpeg.len())
+                )),
+            );
+        }
+        let schematic_sizes = [(".schem", &schem_bytes), (".litematic", &litematic_bytes)]
+            .into_iter()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .map(|(format, bytes)| format!("{} {format}", memory::format_bytes(bytes.len())))
+            .collect::<Vec<_>>()
+            .join(" + ");
         debug_line(
             "schematics",
             t_schematic,
-            Some(format!(
-                "{} .schem + {} .litematic, gzipped",
-                memory::format_bytes(schem_bytes.len()),
-                memory::format_bytes(litematic_bytes.len())
-            )),
+            Some(format!("{schematic_sizes}, gzipped")),
         );
-        debug_line("html", t_html, Some(memory::format_bytes(page.len())));
+        if let Some(page) = &page {
+            debug_line("html", t_html, Some(memory::format_bytes(page.len())));
+        }
         debug_line("total", started.elapsed(), None);
         println!(
             "{}: {:<18} {:.3} OKLab dE per cell, {:.4} mean OKLab dE per pixel",

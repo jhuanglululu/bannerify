@@ -38,6 +38,25 @@ original, type a row/column into the crafting guide to get that banner's
 pattern steps and a copy-pasteable `/give` command, and download the
 schematics from the buttons at the top.
 
+### Output formats
+
+Use `--format schem` or `--format litematic` to write a standalone schematic
+without generating HTML or its preview images:
+
+```sh
+bannerify input.jpg output.schem --row 20 --format schem
+bannerify input.jpg output.litematic --row 20 --format litematic
+```
+
+`--format html` is the default and includes both schematic downloads in the
+report. The output path is used exactly as supplied; its extension does not
+select the format. You can also set `format = "schem"` (or `"html"` /
+`"litematic"`) in a TOML config passed with `--config`; the CLI flag takes
+precedence.
+
+`--render wall.png` can additionally save a PNG in any mode. `--preview` only
+affects HTML and has no effect on schematic output.
+
 ### Quality knobs
 
 The defaults are a good speed/quality balance. For a nicer result:

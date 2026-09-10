@@ -11,7 +11,7 @@ use crate::layout::{Dimension, ResizingMethod};
 use colored::Colorize;
 use serde::Deserialize;
 
-use crate::cli::Args;
+use crate::cli::{Args, OutputFormat};
 use crate::logger::error_out;
 
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
@@ -24,6 +24,7 @@ const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 pub struct Config {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub format: OutputFormat,
     pub dimension: Dimension,
     pub workers: Option<usize>,
     pub resizing_method: ResizingMethod,
@@ -63,6 +64,7 @@ pub struct RefinementConfig {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigToml {
+    pub format: Option<OutputFormat>,
     pub workers: Option<usize>,
     pub fit: Option<bool>,
     pub stretch: Option<bool>,
@@ -90,6 +92,7 @@ impl From<Args> for Config {
         Config {
             input: validate_input(args.input),
             output: args.output,
+            format: args.format.or(config.format).unwrap_or_default(),
             dimension: parse_dimension(args.row, args.columns),
             workers: args.workers.or(config.workers),
             resizing_method: parse_resizing_method(
