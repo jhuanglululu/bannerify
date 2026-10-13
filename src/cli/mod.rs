@@ -5,13 +5,33 @@ use std::path::PathBuf;
 pub mod config;
 
 /// The artifact written to the output path.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    clap::ValueEnum,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     #[default]
     Html,
     Schem,
     Litematic,
+    /// The solved wall as data: every banner, the block grid, the materials
+    Json,
+}
+
+/// What `--list` prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ListKind {
+    Patterns,
+    Blocks,
+    Dyes,
 }
 
 /// `bannerify <input> <output> [options]`
@@ -23,13 +43,20 @@ pub enum OutputFormat {
     long_about = "Approximate an image with a wall of Minecraft banners.\n\n\
                   The image is resized to the banner wall internally — you never \
                   need to scale it yourself. Give the wall size with --row or \
-                  --columns; the other axis is inferred from the aspect ratio."
+                  --columns; the other axis is inferred from the aspect ratio.",
+    after_long_help = "Output: log lines go to stderr; stdout carries only the --json \
+                       result object or the --list listing.\n\n\
+                       Exit codes: 0 success, 2 invalid arguments or config file, \
+                       3 input image missing or unreadable, 4 output not writable, \
+                       5 CPU lacks AVX2+FMA, 1 internal error."
 )]
 pub struct Args {
     /// Input image path
-    pub input: PathBuf,
+    #[arg(required_unless_present = "list")]
+    pub input: Option<PathBuf>,
     /// Output path, used exactly as supplied; contents are selected by --format
-    pub output: PathBuf,
+    #[arg(required_unless_present = "list")]
+    pub output: Option<PathBuf>,
 
     /// Output format [default: html, with preview, crafting guide and embedded schematics]
     #[arg(long, value_enum)]
@@ -53,6 +80,19 @@ pub struct Args {
     /// Log per-stage wall timings and peak memory (no extra files are written)
     #[arg(long)]
     pub debug: bool,
+
+    /// Print one JSON object on stdout describing the result (or the errors)
+    /// instead of log lines; for scripts and tools calling bannerify
+    #[arg(long)]
+    pub json: bool,
+
+    /// Only print warnings and errors
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Print the valid ids of a kind and exit; no input or output needed
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub list: Option<ListKind>,
 
     /// Perturbation RNG seed [default: 0]; runs are fully deterministic per
     /// seed, and different seeds explore different perturbation draws. Only

@@ -1,24 +1,30 @@
 //! Merging CLI flags with the TOML config file, and validating the result.
 //!
-//! CLI values always win over file values. Validation failures print one
-//! friendly coloured line and exit (see
-//! [`error_out!`](crate::logger::error_out)).
+//! CLI values always win over file values. Validation collects every problem
+//! before giving up, so one run reports all of them (see
+//! [`fail`](crate::logger::fail)); each problem names the flag or the config
+//! key it came from, with the same wording for both.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::fmt::Display;
+use std::path::{Path, PathBuf};
 
-use crate::layout::{Dimension, ResizingMethod};
-use colored::Colorize;
 use serde::Deserialize;
+use serde_json::{Value, json};
 
+use crate::block;
 use crate::cli::{Args, OutputFormat};
-use crate::logger::error_out;
+use crate::layout::{Dimension, ResizingMethod};
+use crate::logger::{Diagnostic, Kind, fail, warn};
+use crate::pattern;
 
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
 
 /// Provisional: picked before the A/B of `context/plans/6-feature-map.md`
 /// step 6 has been run.
 const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
+
+const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 
 /// The validated, merged configuration the pipeline runs on.
 pub struct Config {
@@ -86,50 +92,122 @@ pub struct ConfigToml {
 
 impl From<Args> for Config {
     fn from(args: Args) -> Self {
-        let (config, config_path) = load_config(args.config.as_deref());
-        let n_layers = parse_n_layers(&config_path, &args.layer_range, config.layer_range);
+        let mut c = Checker::default();
+        let config = c.load_config(args.config.as_deref());
+
+        let input = args.input.expect("clap requires <INPUT> without --list");
+        if !input.exists() {
+            c.errors.push(
+                Diagnostic::new(
+                    Kind::InputError,
+                    format!("input '{}' does not exist", input.display()),
+                )
+                .path(input.display()),
+            );
+        }
+
+        let dimension = c.dimension(args.row, args.columns);
+        let resizing_method = c.resizing_method(
+            args.fit,
+            args.stretch,
+            args.fill.as_deref(),
+            (config.fit, config.stretch, config.fill.as_deref()),
+        );
+        let n_layers = c.n_layers(&args.layer_range, config.layer_range);
+        let window_size = c.window_size(
+            n_layers.map(|l| l.0),
+            pick(
+                args.window_size,
+                "--window-size",
+                config.window_size,
+                "window_size",
+            ),
+        );
+        let error_threshold = c.error_threshold(pick(
+            args.error_threshold,
+            "--error-threshold",
+            config.error_threshold,
+            "error_threshold",
+        ));
+        let feature_weight = c.feature_weight(pick(
+            args.feature_weight,
+            "--feature-weight",
+            config.feature_weight,
+            "feature_weight",
+        ));
+        let perturbations = c.perturbations(&args.perturbations, config.perturbations);
+        let preview = pick(args.preview, "--preview", config.preview, "preview");
+        c.preview(preview);
+        let exclude_patterns = c.exclude(
+            pick(
+                args.exclude_patterns.map(split_ids),
+                "--exclude-patterns",
+                config.exclude_patterns,
+                "exclude_patterns",
+            ),
+            &pattern::ids(),
+            "pattern",
+            "patterns",
+        );
+        let exclude_blocks = c.exclude(
+            pick(
+                args.exclude_blocks.map(split_ids),
+                "--exclude-blocks",
+                config.exclude_blocks,
+                "exclude_blocks",
+            ),
+            &block::ids(),
+            "block",
+            "blocks",
+        );
+
+        if !c.errors.is_empty() {
+            fail(c.errors);
+        }
+
+        let format = args.format.or(config.format).unwrap_or_default();
+        let seed = pick(args.seed, "--seed", config.seed, "seed");
+        // Warnings only once the configuration is known to be valid.
+        if let Some((_, origin)) = preview
+            && format != OutputFormat::Html
+        {
+            warn(c.diag(
+                Kind::NoEffect,
+                origin,
+                format!(
+                    "{} has no effect with --format {}",
+                    c.name(origin),
+                    format_name(format)
+                ),
+            ));
+        }
+        if let Some((_, origin)) = seed
+            && perturbations.is_none()
+        {
+            warn(c.diag(
+                Kind::NoEffect,
+                origin,
+                format!("{} has no effect without --perturbations", c.name(origin)),
+            ));
+        }
 
         Config {
-            input: validate_input(args.input),
-            output: args.output,
-            format: args.format.or(config.format).unwrap_or_default(),
-            dimension: parse_dimension(args.row, args.columns),
+            input,
+            output: args.output.expect("clap requires <OUTPUT> without --list"),
+            format,
+            dimension,
             workers: args.workers.or(config.workers),
-            resizing_method: parse_resizing_method(
-                args.fit,
-                args.stretch,
-                args.fill.as_deref(),
-                (config.fit, config.stretch, config.fill.as_deref()),
-            ),
+            resizing_method,
             debug: args.debug,
-            exclude_patterns: HashSet::from_iter(
-                args.exclude_patterns
-                    .map(|pat| pat.split(',').map(str::to_string).collect())
-                    .or(config.exclude_patterns)
-                    .unwrap_or_default(),
-            ),
-            exclude_blocks: HashSet::from_iter(
-                args.exclude_blocks
-                    .map(|pat| pat.split(',').map(str::to_string).collect())
-                    .or(config.exclude_blocks)
-                    .unwrap_or_default(),
-            ),
-            preview: parse_preview(args.preview.or(config.preview)),
+            exclude_patterns,
+            exclude_blocks,
+            preview: preview.map(|(p, _)| p),
             render: args.render.or(config.render),
-            n_layers,
+            n_layers: n_layers.unwrap_or(DEFAULT_LAYERS),
             refinement: RefinementConfig {
                 refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
-                window_size: parse_window_size(
-                    &config_path,
-                    n_layers.0,
-                    args.window_size,
-                    config.window_size,
-                ),
-                error_threshold: parse_error_threshold(
-                    &config_path,
-                    args.error_threshold,
-                    config.error_threshold,
-                ),
+                window_size,
+                error_threshold,
                 refinement_candidate: args
                     .refinement_candidate
                     .or(config.refinement_candidate)
@@ -139,332 +217,424 @@ impl From<Args> for Config {
                     .or(config.exact_candidates)
                     .unwrap_or(DEFAULT_EXACT_CANDIDATES),
             },
-            feature_weight: parse_feature_weight(
-                &config_path,
-                args.feature_weight,
-                config.feature_weight,
-            ),
-            perturbations: parse_perturbation(
-                &config_path,
-                &args.perturbations,
-                config.perturbations,
-            ),
-            seed: args.seed.or(config.seed).unwrap_or(0),
+            feature_weight,
+            perturbations,
+            seed: seed.map_or(0, |(s, _)| s),
         }
     }
 }
 
-fn load_config(path: Option<&std::path::Path>) -> (ConfigToml, String) {
-    let Some(path) = path else {
-        return (ConfigToml::default(), String::new());
-    };
-    let shown = path.display().to_string();
-
-    if !path.exists() {
-        error_out!("'{}' does not exists", shown.yellow());
+impl Config {
+    /// The effective settings, for the `--json` result: enough to repeat the
+    /// run. `workers` is the pool size actually used.
+    pub fn settings_json(&self, workers: usize) -> Value {
+        let (layout, fill) = match self.resizing_method {
+            ResizingMethod::Fit => ("fit", None),
+            ResizingMethod::Stretch => ("stretch", None),
+            ResizingMethod::Fill([r, g, b]) => ("fill", Some(format!("#{r:02x}{g:02x}{b:02x}"))),
+        };
+        let (row, columns) = match self.dimension {
+            Dimension::Row(r) => (Some(r), None),
+            Dimension::Column(c) => (None, Some(c)),
+        };
+        fn sorted(set: &HashSet<String>) -> Vec<&str> {
+            let mut ids: Vec<&str> = set.iter().map(String::as_str).collect();
+            ids.sort_unstable();
+            ids
+        }
+        json!({
+            "row": row,
+            "columns": columns,
+            "layout": layout,
+            "fill_color": fill,
+            "layer_range": [self.n_layers.0, self.n_layers.1],
+            "refinement_pass": self.refinement.refinement_pass,
+            "window_size": self.refinement.window_size,
+            "error_threshold": shortest(self.refinement.error_threshold),
+            "refinement_candidate": self.refinement.refinement_candidate,
+            "exact_candidates": self.refinement.exact_candidates,
+            "feature_weight": shortest(self.feature_weight),
+            "perturbations": self.perturbations.map(|(t, d, r)| [t, d, r]),
+            "seed": self.seed,
+            "workers": workers,
+            "exclude_patterns": sorted(&self.exclude_patterns),
+            "exclude_blocks": sorted(&self.exclude_blocks),
+            "preview": self.preview,
+        })
     }
-
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        error_out!(
-            "error reading '{}': {}",
-            shown.yellow(),
-            e.to_string().red()
-        );
-    });
-
-    let config = toml::from_str::<ConfigToml>(&text).unwrap_or_else(|e| {
-        error_out!(
-            "error parsing '{}': {}",
-            shown.yellow(),
-            e.to_string().red()
-        );
-    });
-
-    (config, shown)
 }
 
-/// `--preview 0` is meaningless — a zero-pixel image — and almost certainly a
-/// typo, so it is refused rather than silently clamped to one pixel.
-fn parse_preview(preview: Option<usize>) -> Option<usize> {
-    if preview == Some(0) {
-        error_out!(
-            "'{}' needs to be at least '{}'",
-            "--preview".yellow(),
-            "1".yellow()
-        );
-    }
-    preview
+/// An `f32` as the decimal it was written as: `0.7`, not the `0.699999988`
+/// its widening to `f64` would print.
+fn shortest(x: f32) -> Value {
+    x.to_string()
+        .parse::<f64>()
+        .map_or(Value::Null, Value::from)
 }
 
-fn validate_input(input: PathBuf) -> PathBuf {
-    if !input.exists() {
-        error_out!("'{}' does not exists", input.display().to_string().yellow());
+pub fn format_name(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Html => "html",
+        OutputFormat::Schem => "schem",
+        OutputFormat::Litematic => "litematic",
+        OutputFormat::Json => "json",
     }
-    input
 }
 
-fn parse_dimension(row: Option<usize>, col: Option<usize>) -> Dimension {
-    match (row, col) {
-        (Some(r), None) => {
-            if r < 1 {
-                error_out!(
-                    "'{}' needs to be at least '{}'",
-                    "--row".yellow(),
-                    "1".yellow()
-                );
+/// Where a value came from, which decides how a problem with it is named:
+/// `--window-size`, or `window_size in 'cfg.toml'`.
+#[derive(Clone, Copy)]
+enum Origin {
+    Flag(&'static str),
+    Key(&'static str),
+}
+
+/// The CLI value if given, else the config-file value, with where it came from.
+fn pick<T>(
+    arg: Option<T>,
+    flag: &'static str,
+    file: Option<T>,
+    key: &'static str,
+) -> Option<(T, Origin)> {
+    match (arg, file) {
+        (Some(v), _) => Some((v, Origin::Flag(flag))),
+        (None, Some(v)) => Some((v, Origin::Key(key))),
+        (None, None) => None,
+    }
+}
+
+/// `'globe, mojang'` → `["globe", "mojang"]`.
+fn split_ids(list: String) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Validation state: every problem found so far, and the config file path the
+/// `Key` origins refer to.
+#[derive(Default)]
+struct Checker {
+    errors: Vec<Diagnostic>,
+    config_path: String,
+}
+
+impl Checker {
+    fn name(&self, origin: Origin) -> String {
+        match origin {
+            Origin::Flag(flag) => flag.to_string(),
+            Origin::Key(key) => format!("{key} in '{}'", self.config_path),
+        }
+    }
+
+    fn diag(&self, kind: Kind, origin: Origin, message: String) -> Diagnostic {
+        let d = Diagnostic::new(kind, message);
+        match origin {
+            Origin::Flag(flag) => d.option(flag),
+            Origin::Key(key) => d.key(key).config(&self.config_path),
+        }
+    }
+
+    /// Records `<name> must be <requirement> (got <value>)`.
+    fn invalid(&mut self, origin: Origin, value: impl Display, requirement: impl Display) {
+        let message = format!("{} must be {requirement} (got {value})", self.name(origin));
+        let d = self.diag(Kind::InvalidValue, origin, message).value(value);
+        self.errors.push(d);
+    }
+
+    fn load_config(&mut self, path: Option<&Path>) -> ConfigToml {
+        let Some(path) = path else {
+            return ConfigToml::default();
+        };
+        self.config_path = path.display().to_string();
+        let shown = &self.config_path;
+
+        let problem = if !path.exists() {
+            format!("config file '{shown}' does not exist")
+        } else {
+            match std::fs::read_to_string(path) {
+                Err(e) => format!("could not read config file '{shown}': {e}"),
+                Ok(text) => match toml::from_str::<ConfigToml>(&text) {
+                    Ok(config) => return config,
+                    Err(e) => format!(
+                        "could not parse config file '{shown}': {}",
+                        e.to_string().trim_end()
+                    ),
+                },
             }
-            Dimension::Row(r)
-        }
-        (None, Some(c)) => {
-            if c < 1 {
-                error_out!(
-                    "'{}' needs to be at least '{}'",
-                    "--columns".yellow(),
-                    "1".yellow()
-                );
-            }
-            Dimension::Column(c)
-        }
-        (Some(_), Some(_)) => {
-            error_out!(
-                "only one of '{}' or '{}' can be entered",
-                "--row".yellow(),
-                "--columns".yellow()
-            );
-        }
-        (None, None) => {
-            error_out!(
-                "one of '{}' or '{}' is required",
-                "--row".yellow(),
-                "--columns".yellow()
-            );
-        }
+        };
+        let d = Diagnostic::new(Kind::ConfigError, problem)
+            .option("--config")
+            .path(shown);
+        self.errors.push(d);
+        ConfigToml::default()
     }
-}
 
-fn parse_resizing_method(
-    fit: bool,
-    stretch: bool,
-    fill: Option<&str>,
-    config_settings: (Option<bool>, Option<bool>, Option<&str>),
-) -> ResizingMethod {
-    match (fit, stretch, fill) {
-        (true, false, None) => ResizingMethod::Fit,
-        (false, true, None) => ResizingMethod::Stretch,
-        (false, false, Some(color_str)) => match parse_color(color_str) {
-            Ok(color) => ResizingMethod::Fill(color),
-            Err(e) => error_out!("{}", e),
-        },
-        (false, false, None) => match config_settings {
-            (Some(true), Some(false) | None, None) => ResizingMethod::Fit,
-            (Some(false) | None, Some(true), None) => ResizingMethod::Stretch,
-            (Some(false) | None, Some(false) | None, Some(color_str)) => {
-                match parse_color(color_str) {
-                    Ok(color) => ResizingMethod::Fill(color),
-                    Err(e) => error_out!("{}", e),
+    fn dimension(&mut self, row: Option<usize>, col: Option<usize>) -> Dimension {
+        match (row, col) {
+            (Some(r), None) => {
+                if r < 1 {
+                    self.invalid(Origin::Flag("--row"), r, "at least 1");
                 }
+                Dimension::Row(r)
             }
-            (Some(false) | None, Some(false) | None, None) => ResizingMethod::Fit,
-            _ => {
-                error_out!(
-                    "only one of '{}', '{}' or '{}' can exist in config",
-                    "fit".yellow(),
-                    "stretch".yellow(),
-                    "fill".yellow()
+            (None, Some(c)) => {
+                if c < 1 {
+                    self.invalid(Origin::Flag("--columns"), c, "at least 1");
+                }
+                Dimension::Column(c)
+            }
+            (Some(r), Some(_)) => {
+                self.errors.push(Diagnostic::new(
+                    Kind::Conflict,
+                    "only one of --row or --columns can be given",
+                ));
+                Dimension::Row(r)
+            }
+            (None, None) => {
+                self.errors.push(
+                    Diagnostic::new(Kind::Missing, "one of --row or --columns is required").hint(
+                        "--row sets the wall height, --columns its width; the other is inferred",
+                    ),
                 );
+                Dimension::Row(1)
             }
-        },
-        _ => {
-            error_out!(
-                "only one of '{}', '{}' or '{}' can be entered",
-                "--fit".yellow(),
-                "--stretch".yellow(),
-                "--fill".yellow()
-            );
         }
     }
-}
 
-fn parse_n_layers(
-    config_path: &str,
-    layers_vec: &[usize],
-    config_vec: Option<Vec<usize>>,
-) -> (usize, usize) {
-    let layers = if !layers_vec.is_empty() {
-        (layers_vec[0], layers_vec[1])
-    } else if let Some(ref layer_range) = config_vec {
-        if layer_range.len() != 2 {
-            error_out!(
-                "'{}' in '{}' can only have two elements: '{}'",
-                "layer_range".yellow(),
-                config_path.yellow(),
-                "[MIN, MAX]".yellow(),
-            );
+    fn resizing_method(
+        &mut self,
+        fit: bool,
+        stretch: bool,
+        fill: Option<&str>,
+        config_settings: (Option<bool>, Option<bool>, Option<&str>),
+    ) -> ResizingMethod {
+        match (fit, stretch, fill) {
+            (true, false, None) => ResizingMethod::Fit,
+            (false, true, None) => ResizingMethod::Stretch,
+            (false, false, Some(color)) => self.color(Origin::Flag("--fill"), color),
+            (false, false, None) => match config_settings {
+                (Some(true), Some(false) | None, None) => ResizingMethod::Fit,
+                (Some(false) | None, Some(true), None) => ResizingMethod::Stretch,
+                (Some(false) | None, Some(false) | None, Some(color)) => {
+                    self.color(Origin::Key("fill"), color)
+                }
+                (Some(false) | None, Some(false) | None, None) => ResizingMethod::Fit,
+                _ => {
+                    let d = Diagnostic::new(
+                        Kind::Conflict,
+                        format!(
+                            "only one of fit, stretch or fill can be set in '{}'",
+                            self.config_path
+                        ),
+                    )
+                    .config(&self.config_path);
+                    self.errors.push(d);
+                    ResizingMethod::Fit
+                }
+            },
+            _ => {
+                self.errors.push(Diagnostic::new(
+                    Kind::Conflict,
+                    "only one of --fit, --stretch or --fill can be given",
+                ));
+                ResizingMethod::Fit
+            }
         }
-        (layer_range[0], layer_range[1])
-    } else {
-        (4, 6)
-    };
-
-    if layers.0 > layers.1 {
-        error_out!(
-            "'{}' can not be greater than '{}' in '{}'",
-            "MIN".yellow(),
-            "MAX".yellow(),
-            "layer_range".yellow(),
-        );
     }
 
-    if layers.0 < 1 {
-        error_out!(
-            "'{}' can not be less than '{}' in '{}'",
-            "MIN".yellow(),
-            "1".yellow(),
-            "layer_range".yellow(),
-        );
+    fn color(&mut self, origin: Origin, color: &str) -> ResizingMethod {
+        match parse_color(color) {
+            Ok(rgb) => ResizingMethod::Fill(rgb),
+            Err(problem) => {
+                let message = format!(
+                    "{} must be a color (got '{color}'): {problem}",
+                    self.name(origin)
+                );
+                let d = self
+                    .diag(Kind::InvalidValue, origin, message)
+                    .value(color)
+                    .hint("use a form like '#ff9453', '9,4,87' or 'rgb(11, 45, 14)'");
+                self.errors.push(d);
+                ResizingMethod::Fit
+            }
+        }
     }
 
-    layers
-}
+    /// `None` when the range is invalid, so the checks that depend on it are
+    /// skipped instead of reporting a knock-on error.
+    fn n_layers(&mut self, args: &[usize], file: Option<Vec<usize>>) -> Option<(usize, usize)> {
+        let (layers, origin) = if !args.is_empty() {
+            ((args[0], args[1]), Origin::Flag("--layer-range"))
+        } else if let Some(range) = file {
+            if range.len() != 2 {
+                self.invalid(
+                    Origin::Key("layer_range"),
+                    format!("{range:?}"),
+                    "a list of two elements [MIN, MAX]",
+                );
+                return None;
+            }
+            ((range[0], range[1]), Origin::Key("layer_range"))
+        } else {
+            return Some(DEFAULT_LAYERS);
+        };
 
-fn parse_window_size(
-    config_path: &str,
-    min_layer: usize,
-    window_size: Option<usize>,
-    config: Option<usize>,
-) -> usize {
-    if let Some(k) = window_size {
+        let shown = format!("{} {}", layers.0, layers.1);
+        let before = self.errors.len();
+        if layers.0 > layers.1 {
+            self.invalid(origin, &shown, "MIN MAX with MIN no greater than MAX");
+        }
+        if layers.0 < 1 {
+            self.invalid(origin, &shown, "MIN MAX with MIN at least 1");
+        }
+        (self.errors.len() == before).then_some(layers)
+    }
+
+    fn window_size(&mut self, min_layer: Option<usize>, value: Option<(usize, Origin)>) -> usize {
+        let Some((k, origin)) = value else {
+            return 2;
+        };
         if k < 1 {
-            error_out!(
-                "'{}' value need to be greater than '{}'",
-                "--window-size".yellow(),
-                "1".yellow(),
-            );
-        }
-        if min_layer < k {
-            error_out!(
-                "'{}' value need to be less than '{}': '{}'",
-                "--window-size".yellow(),
-                "MIN-LAYERS".yellow(),
-                min_layer.to_string().yellow(),
+            self.invalid(origin, k, "at least 1");
+        } else if let Some(min_layer) = min_layer
+            && k > min_layer
+        {
+            self.invalid(
+                origin,
+                k,
+                format!("at most the minimum layer count {min_layer} (MIN of the layer range)"),
             );
         }
         k
-    } else if let Some(k) = config {
-        if k < 1 {
-            error_out!(
-                "'{}' in '{}' needs to be greater '{}'",
-                "window_size".yellow(),
-                config_path.yellow(),
-                "1".yellow(),
-            );
-        }
-        if min_layer < k {
-            error_out!(
-                "'{}' in '{}' needs to be less than '{}': '{}'",
-                "window_size".yellow(),
-                config_path.yellow(),
-                "MIN-LAYERS".yellow(),
-                min_layer.to_string().yellow(),
-            );
-        }
-        k
-    } else {
-        2
     }
-}
 
-fn parse_error_threshold(config_path: &str, threshold: Option<f32>, config: Option<f32>) -> f32 {
-    if let Some(thresh) = threshold {
-        if !(0.0..=1.0).contains(&thresh) {
-            error_out!(
-                "'{}' value need to be within '{}' and '{}'",
-                "--error-threshold".yellow(),
-                "0.0".yellow(),
-                "1.0".yellow()
-            );
+    fn error_threshold(&mut self, value: Option<(f32, Origin)>) -> f32 {
+        let Some((threshold, origin)) = value else {
+            return 0.7;
+        };
+        if !(0.0..=1.0).contains(&threshold) {
+            self.invalid(origin, threshold, "between 0.0 and 1.0");
         }
-        thresh
-    } else if let Some(thresh) = config {
-        if !(0.0..=1.0).contains(&thresh) {
-            error_out!(
-                "'{}' in '{}' needs to be within '{}' and '{}'",
-                "error_threshold".yellow(),
-                config_path.yellow(),
-                "0.0".yellow(),
-                "1.0".yellow()
-            );
+        threshold
+    }
+
+    /// The feature weight is a ratio, not a bounded fraction: `0` disables the
+    /// term and `1` weighs the idealised banner exactly as heavily as the real
+    /// target, so there is a sensible reason to go above 1 and no defensible
+    /// place to cap it. Only negative and non-finite values are refused.
+    fn feature_weight(&mut self, value: Option<(f32, Origin)>) -> f32 {
+        let Some((weight, origin)) = value else {
+            return DEFAULT_FEATURE_WEIGHT;
+        };
+        if !weight.is_finite() || weight < 0.0 {
+            self.invalid(origin, weight, "a finite number of at least 0.0");
         }
-        thresh
-    } else {
-        0.7
+        weight
     }
-}
 
-/// The feature weight is a ratio, not a bounded fraction: `0` disables the term
-/// and `1` weighs the idealised banner exactly as heavily as the real target, so
-/// there is a sensible reason to go above 1 and no defensible place to cap it.
-/// Only negative and non-finite values are refused.
-fn parse_feature_weight(config_path: &str, weight: Option<f32>, config: Option<f32>) -> f32 {
-    let (value, flag, source) = match (weight, config) {
-        (Some(w), _) => (w, "--feature-weight".to_string(), String::new()),
-        (None, Some(w)) => (
-            w,
-            "feature_weight".to_string(),
-            format!(" in '{}'", config_path.yellow()),
-        ),
-        (None, None) => return DEFAULT_FEATURE_WEIGHT,
-    };
-
-    if !value.is_finite() || value < 0.0 {
-        error_out!(
-            "'{}'{} needs to be a finite value of at least '{}'",
-            flag.yellow(),
-            source,
-            "0.0".yellow()
-        );
-    }
-    value
-}
-
-fn parse_perturbation(
-    config_path: &str,
-    args: &[usize],
-    config: Option<Vec<usize>>,
-) -> Option<(usize, usize, usize)> {
-    if !args.is_empty() {
-        if args.contains(&0) {
-            None
+    fn perturbations(
+        &mut self,
+        args: &[usize],
+        file: Option<Vec<usize>>,
+    ) -> Option<(usize, usize, usize)> {
+        let values = if !args.is_empty() {
+            args.to_vec()
         } else {
-            Some((args[0], args[1], args[2]))
+            let values = file?;
+            if values.len() != 3 {
+                self.invalid(
+                    Origin::Key("perturbations"),
+                    format!("{values:?}"),
+                    "a list of three elements [TOP_N, DUPLICATES, ROUNDS]",
+                );
+                return None;
+            }
+            values
+        };
+        // Any 0 turns the search off.
+        (!values.contains(&0)).then(|| (values[0], values[1], values[2]))
+    }
+
+    /// `--preview 0` is meaningless — a zero-pixel image — and almost
+    /// certainly a typo, so it is refused rather than silently clamped to one
+    /// pixel.
+    fn preview(&mut self, value: Option<(usize, Origin)>) {
+        if let Some((0, origin)) = value {
+            self.invalid(origin, 0, "at least 1");
         }
-    } else if let Some(config_vec) = config {
-        if config_vec.len() != 3 {
-            error_out!(
-                "'{}' in '{}' can only have '{}' elements: '{}'",
-                "perturbations".yellow(),
-                config_path.yellow(),
-                "three".yellow(),
-                "[TOP_N, DUPLICATES, ROUNDS]".yellow(),
+    }
+
+    /// An excluded id that names nothing is a user mistake, not a silent
+    /// no-op; excluding every id leaves the solver nothing to work with.
+    fn exclude(
+        &mut self,
+        value: Option<(Vec<String>, Origin)>,
+        valid: &[String],
+        noun: &str,
+        list: &str,
+    ) -> HashSet<String> {
+        let Some((ids, origin)) = value else {
+            return HashSet::new();
+        };
+        let ids: HashSet<String> = ids.into_iter().collect();
+
+        let mut unknown: Vec<&String> = ids.iter().filter(|id| !valid.contains(id)).collect();
+        unknown.sort_unstable();
+        for id in unknown {
+            let d = self
+                .diag(Kind::UnknownId, origin, format!("unknown {noun} id '{id}'"))
+                .value(id)
+                .suggestions(suggest(id, valid))
+                .hint(format!("run `bannerify --list {list}` for every valid id"));
+            self.errors.push(d);
+        }
+        if valid.iter().all(|id| ids.contains(id)) {
+            let d = self.diag(
+                Kind::InvalidValue,
+                origin,
+                format!(
+                    "{} excludes every {noun}; at least one must remain",
+                    self.name(origin)
+                ),
             );
+            self.errors.push(d);
         }
-        if config_vec.contains(&0) {
-            None
-        } else {
-            Some((config_vec[0], config_vec[1], config_vec[2]))
-        }
-    } else {
-        None
+        ids
     }
 }
 
-fn valid_color_str() -> String {
-    format!(
-        "\n       valid color format includes: '{}', '{}' and '{}'",
-        "#ff9453".yellow(),
-        "9,4,87".yellow(),
-        "rgb(11, 45, 14)".yellow()
-    )
+/// Up to three valid ids close to a mistyped one, closest first. "Close" is
+/// one edit per three characters, between 1 and 2, so short ids don't match
+/// half the table.
+fn suggest(id: &str, valid: &[String]) -> Vec<String> {
+    let limit = (id.chars().count() / 3).clamp(1, 2);
+    let mut close: Vec<(usize, &String)> = valid
+        .iter()
+        .map(|v| (edit_distance(id, v), v))
+        .filter(|&(d, _)| d <= limit)
+        .collect();
+    close.sort();
+    close.into_iter().take(3).map(|(_, v)| v.clone()).collect()
+}
+
+/// Levenshtein distance over chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Parse `#rrggbb`, `rrggbb`, `r,g,b` or `rgb(r, g, b)`.
@@ -474,11 +644,7 @@ pub fn parse_color(s: &str) -> Result<[u8; 3], String> {
         .or_else(|| (!s.contains(',')).then_some(s))
     {
         if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!(
-                "invalid hex color: '{}'. {}",
-                s.yellow(),
-                valid_color_str()
-            ));
+            return Err("a hex color needs exactly 6 hex digits".to_string());
         }
         let r = u8::from_str_radix(&hex[0..2], 16).expect("checked hex digits");
         let g = u8::from_str_radix(&hex[2..4], 16).expect("checked hex digits");
@@ -493,28 +659,33 @@ pub fn parse_color(s: &str) -> Result<[u8; 3], String> {
 
     let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
     if parts.len() != 3 {
-        return Err(format!(
-            "expected 3 components, got {} from '{}'. {}",
-            parts.len().to_string().yellow(),
-            s.yellow(),
-            valid_color_str()
-        ));
+        return Err(format!("expected 3 components, found {}", parts.len()));
     }
 
     Ok([
-        parse_component(parts[0], s)?,
-        parse_component(parts[1], s)?,
-        parse_component(parts[2], s)?,
+        parse_component(parts[0])?,
+        parse_component(parts[1])?,
+        parse_component(parts[2])?,
     ])
 }
 
-fn parse_component(p: &str, s: &str) -> Result<u8, String> {
-    p.parse::<u8>().map_err(|_| {
-        format!(
-            "invalid color component '{}' in '{}'. {}",
-            p.yellow(),
-            s.yellow(),
-            valid_color_str()
-        )
-    })
+fn parse_component(p: &str) -> Result<u8, String> {
+    p.parse::<u8>()
+        .map_err(|_| format!("component '{p}' is not a whole number from 0 to 255"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_rank_close_ids_and_drop_distant_ones() {
+        let valid: Vec<String> = ["globe", "flow", "flower", "mojang", "creeper"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(suggest("glob", &valid), ["globe"]);
+        assert_eq!(suggest("flowr", &valid), ["flow", "flower"]);
+        assert!(suggest("zzzzzz", &valid).is_empty());
+    }
 }

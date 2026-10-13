@@ -37,7 +37,7 @@ use rayon::prelude::*;
 use rust_embed::Embed;
 
 use crate::geometry::{BLOCK_PIXELS, BLOCK_SIDE, MIDDLE_OFFSET, PAD_BOTTOM, PAD_SIDE, PAD_TOP};
-use crate::logger::error_out;
+use crate::logger::internal;
 use crate::oklab::srgb_to_oklab;
 use crate::resample::{Plan, PlanarU8};
 use crate::simd::Chunk;
@@ -158,11 +158,8 @@ impl Blocks {
     }
 }
 
-/// Decode the embedded blocks, dropping every id in `exclude`.
-///
-/// An id in `exclude` that names no block is a user mistake, not a silent
-/// no-op: it exits with the list.
-pub fn load(exclude: &HashSet<String>) -> Blocks {
+/// Every embedded block id, sorted.
+pub fn ids() -> Vec<String> {
     // rust-embed's iteration order follows the directory walk; sort so the
     // block indices — and therefore every distance tie-break — are the same on
     // every machine and every run.
@@ -170,22 +167,18 @@ pub fn load(exclude: &HashSet<String>) -> Blocks {
         .filter_map(|p| p.strip_suffix(".jpg").map(str::to_string))
         .collect();
     all.sort_unstable();
+    all
+}
 
-    let unknown: Vec<&str> = exclude
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !all.iter().any(|name| name == id))
+/// Decode the embedded blocks, dropping every id in `exclude`.
+///
+/// `exclude` has already been checked against [`ids`] by the config
+/// validation, which also refuses to exclude every block.
+pub fn load(exclude: &HashSet<String>) -> Blocks {
+    let names: Vec<String> = ids()
+        .into_iter()
+        .filter(|id| !exclude.contains(id))
         .collect();
-    if !unknown.is_empty() {
-        let mut unknown = unknown;
-        unknown.sort_unstable();
-        error_out!("unknown block id(s): {}", unknown.join(", "));
-    }
-
-    let names: Vec<String> = all.into_iter().filter(|id| !exclude.contains(id)).collect();
-    if names.is_empty() {
-        error_out!("every background block was excluded — nothing left to build the wall from");
-    }
 
     // One shared plan for the 16 → 24 upscale: same source geometry, same
     // target size for every block, so the weight tables are built once.
@@ -217,12 +210,14 @@ pub fn load(exclude: &HashSet<String>) -> Blocks {
 
 fn decode(id: &str, plan: &Plan) -> [u8; TEXTURE_BYTES] {
     let file = BlockAssets::get(&format!("{id}.jpg"))
-        .unwrap_or_else(|| error_out!("internal error: block '{id}' vanished from the binary"));
+        .unwrap_or_else(|| internal(format!("block '{id}' vanished from the binary")));
     let img = image::load_from_memory_with_format(&file.data, image::ImageFormat::Jpeg)
-        .unwrap_or_else(|e| error_out!("could not decode block '{id}': {e}"));
+        .unwrap_or_else(|e| internal(format!("could not decode block '{id}': {e}")));
 
     if img.dimensions() != (TEXTURE_SIDE as u32, TEXTURE_SIDE as u32) {
-        error_out!("block '{id}' is not {TEXTURE_SIDE}x{TEXTURE_SIDE} pixels");
+        internal(format!(
+            "block '{id}' is not {TEXTURE_SIDE}x{TEXTURE_SIDE} pixels"
+        ));
     }
 
     let rgb = img.to_rgb8();

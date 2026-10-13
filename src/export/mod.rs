@@ -1,5 +1,5 @@
 //! Turning the solved wall into the things a player can use: the shared [`Wall`]
-//! view, and the helpers the schematic and HTML writers share.
+//! view, and the helpers the schematic, HTML and JSON writers share.
 
 use std::collections::HashMap;
 
@@ -9,6 +9,7 @@ use crate::pattern::Patterns;
 use crate::solver::Solution;
 
 pub mod html;
+pub mod json;
 pub mod nbt;
 pub mod schematic;
 

@@ -8,22 +8,28 @@
 //! entirely internal to an item — no shared mutable state, no locking, no
 //! cross-item handoff.
 
+use std::io::{IsTerminal, stderr};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use colored::Colorize;
 use rayon::prelude::*;
+use serde_json::{Map, Value, json};
 
 use crate::block::{self, Blocks};
-use crate::cli::config::Config;
-use crate::cli::{Args, OutputFormat};
-use crate::export::{Wall, html, schematic};
+use crate::cli::config::{Config, format_name};
+use crate::cli::{Args, ListKind, OutputFormat};
+use crate::color::{COLOR_NAMES, NUM_COLORS};
+use crate::export::{Wall, color_label, hex, html, json as json_export, pattern_label, schematic};
 use crate::geometry::BLOCK_SIDE;
 use crate::layout::Layout;
-use crate::logger::{error_out, info};
+use crate::logger::{
+    self, Diagnostic, Kind, Mode, SCHEMA_VERSION, debug_print, fatal, info, internal,
+};
 use crate::memory;
 use crate::pattern;
 use crate::preview;
@@ -243,26 +249,111 @@ fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
 
 /// Parse arguments, validate, and run the pipeline.
 pub fn run_cli() {
+    // Every human-facing line is on stderr, so colour follows stderr, not the
+    // stdout `colored` checks by default.
+    if !stderr().is_terminal() && std::env::var_os("CLICOLOR_FORCE").is_none() {
+        colored::control::set_override(false);
+    }
+    // Known before parsing, so a CPU or parse failure is reported as JSON too.
+    if std::env::args_os().any(|a| a == "--json") {
+        logger::set_mode(Mode::Json);
+    }
     check_cpu_features();
 
-    let args = Args::parse();
+    let args = parse_args();
+    logger::set_mode(if args.json {
+        Mode::Json
+    } else if args.quiet {
+        Mode::Quiet
+    } else {
+        Mode::Text
+    });
+    if let Some(kind) = args.list {
+        list(kind);
+        return;
+    }
     let config = Config::from(args);
 
     if let Some(workers) = config.workers {
         rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .build_global()
-            .unwrap_or_else(|e| {
-                error_out!(
-                    "could not start {} workers: {}",
-                    workers,
-                    e.to_string().red()
-                );
-            });
+            .unwrap_or_else(|e| internal(format!("could not start {workers} workers: {e}")));
     }
     info!("using {} workers", rayon::current_num_threads());
 
     run(&config);
+}
+
+/// clap's own errors keep clap's output in text mode; under `--json` they
+/// become a `usage` diagnostic. Help and version always print normally.
+fn parse_args() -> Args {
+    Args::try_parse().unwrap_or_else(|e| {
+        let informational = matches!(
+            e.kind(),
+            ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        if informational || logger::mode() != Mode::Json {
+            e.exit();
+        }
+        // The rendered error up to the first blank line, which drops the
+        // usage block and the "For more information" footer.
+        let rendered = e.render().to_string();
+        let first = rendered.split("\n\n").next().unwrap_or_default();
+        let message = first
+            .strip_prefix("error: ")
+            .unwrap_or(first)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut d = Diagnostic::new(Kind::Usage, message).hint("run `bannerify --help` for usage");
+        match e.get(ContextKind::InvalidArg) {
+            Some(ContextValue::String(arg)) => {
+                d = d.option(arg.split_whitespace().next().unwrap_or(arg));
+            }
+            Some(ContextValue::Strings(args)) => d = d.option(args.join(" ")),
+            _ => {}
+        }
+        if let Some(ContextValue::String(value)) = e.get(ContextKind::InvalidValue) {
+            d = d.value(value);
+        }
+        fatal(d)
+    })
+}
+
+/// `--list KIND`: the valid ids, one per line, or one JSON object.
+fn list(kind: ListKind) {
+    let (key, entries): (&str, Vec<Value>) = match kind {
+        ListKind::Patterns => (
+            "patterns",
+            pattern::ids()
+                .into_iter()
+                .map(|id| json!({"id": id, "name": pattern_label(&id)}))
+                .collect(),
+        ),
+        ListKind::Blocks => (
+            "blocks",
+            block::ids()
+                .into_iter()
+                .map(|id| json!({"id": id}))
+                .collect(),
+        ),
+        ListKind::Dyes => (
+            "dyes",
+            (0..NUM_COLORS)
+                .map(|i| json!({"id": COLOR_NAMES[i], "name": color_label(i), "hex": hex(i)}))
+                .collect(),
+        ),
+    };
+    if logger::mode() == Mode::Json {
+        logger::print_result(&json!({"ok": true, "schema_version": SCHEMA_VERSION, key: entries}));
+    } else {
+        for entry in &entries {
+            println!("{}", entry["id"].as_str().expect("every entry has an id"));
+        }
+    }
 }
 
 /// Refuse to run an AVX2 build on a CPU that predates AVX2.
@@ -299,11 +390,12 @@ fn check_cpu_features() {
     };
 
     if !ok {
-        error_out!(
-            "this build requires {} (any Intel/AMD CPU from ~2013 onwards); \
-             rebuild with {} for older CPUs",
-            "AVX2+FMA".red(),
-            "--features force-scalar".yellow()
+        fatal(
+            Diagnostic::new(
+                Kind::UnsupportedCpu,
+                "this build requires AVX2+FMA (any Intel/AMD CPU from ~2013 onwards)",
+            )
+            .hint("rebuild with `--features force-scalar` for older CPUs"),
         );
     }
 }
@@ -322,11 +414,13 @@ fn run(config: &Config) {
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
     let decoded = image::open(&config.input).unwrap_or_else(|e| {
-        error_out!(
-            "could not read '{}': {}",
-            config.input.display().to_string().yellow(),
-            e.to_string().red()
-        );
+        fatal(
+            Diagnostic::new(
+                Kind::InputError,
+                format!("could not read input '{}': {e}", config.input.display()),
+            )
+            .path(config.input.display()),
+        )
     });
     let rgb = decoded.to_rgb8();
     let (src_w, src_h) = (rgb.width() as usize, rgb.height() as usize);
@@ -456,8 +550,8 @@ fn run(config: &Config) {
 
     // ---- the full-resolution wall, only when asked for by name -------------
     let t = Instant::now();
-    if let Some(path) = &config.render {
-        write_png(
+    let render_bytes = config.render.as_ref().map(|path| {
+        let bytes = write_png(
             path,
             canvas.as_ref().expect("render needs canvas"),
             layout.wall_width,
@@ -467,7 +561,8 @@ fn run(config: &Config) {
             "wrote '{}': the full-resolution wall render",
             path.display().to_string().yellow()
         );
-    }
+        bytes
+    });
     let t_render = t.elapsed();
 
     // HTML alone needs the comparison previews and their encoded images.
@@ -536,18 +631,19 @@ fn run(config: &Config) {
             Vec::new(),
             schematic::litematic(&wall, &stem, now.as_millis() as i64),
         ),
+        OutputFormat::Json => (Vec::new(), Vec::new()),
     };
     let t_schematic = t.elapsed();
 
+    let input_name = config
+        .input
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| config.input.display().to_string());
     let t = Instant::now();
     let page = previews
         .as_ref()
         .map(|(pw, ph, preview_png, original_jpeg, _, _)| {
-            let input_name = config
-                .input
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| config.input.display().to_string());
             let report = html::Report {
                 input: &input_name,
                 stem: &stem,
@@ -561,6 +657,8 @@ fn run(config: &Config) {
             html::page(&wall, &report)
         });
     let t_html = t.elapsed();
+    let document =
+        (config.format == OutputFormat::Json).then(|| json_export::document(&wall, &input_name));
     let (bytes, description) = match config.format {
         OutputFormat::Html => (
             page.as_ref().expect("HTML page").as_bytes(),
@@ -568,14 +666,12 @@ fn run(config: &Config) {
         ),
         OutputFormat::Schem => (schem_bytes.as_slice(), "Sponge schematic"),
         OutputFormat::Litematic => (litematic_bytes.as_slice(), "Litematica schematic"),
+        OutputFormat::Json => (
+            document.as_deref().expect("JSON document"),
+            "banner wall JSON",
+        ),
     };
-    std::fs::write(&config.output, bytes).unwrap_or_else(|e| {
-        error_out!(
-            "could not write '{}': {}",
-            config.output.display().to_string().yellow(),
-            e.to_string().red()
-        );
-    });
+    std::fs::write(&config.output, bytes).unwrap_or_else(|e| write_failed(&config.output, e));
     info!(
         "wrote '{}': {} ({})",
         config.output.display().to_string().yellow(),
@@ -583,23 +679,27 @@ fn run(config: &Config) {
         memory::format_bytes(bytes.len()),
     );
 
-    if config.debug {
-        let n_cells = layout.rows * layout.columns;
-        let mean_err = total_err / n_cells as f64;
+    let n_cells = layout.rows * layout.columns;
+    let err_per_cell = total_err / n_cells as f64;
+    let lab_per_pixel = total_lab / n_cells as f64;
 
-        debug_line("decode", t_decode, None);
-        debug_line("layout+tables", t_plan, None);
-        debug_line("variance", t_variance, None);
-        debug_line(
+    // (stage, wall time, note); the leading spaces nest a stage under the one
+    // above it in the text form.
+    let mut timings: Vec<(&str, Duration, Option<String>)> = Vec::new();
+    if config.debug {
+        timings.push(("decode", t_decode, None));
+        timings.push(("layout+tables", t_plan, None));
+        timings.push(("variance", t_variance, None));
+        timings.push((
             "pipeline",
             t_pipeline,
             Some(format!(
                 "{:.0} cells/s",
                 n_cells as f64 / t_pipeline.as_secs_f64()
             )),
-        );
-        debug_line("  resample", cpu_resample, None);
-        debug_line(
+        ));
+        timings.push(("  resample", cpu_resample, None));
+        timings.push((
             "  blocks",
             cpu_blocks,
             Some(format!(
@@ -607,29 +707,29 @@ fn run(config: &Config) {
                 (layout.rows + 1) * layout.columns,
                 blocks.len()
             )),
-        );
-        debug_line("  solve", cpu_solve, None);
-        debug_line("    feature", stages.feature, None);
-        debug_line("    greedy+refine", stages.greedy + stages.refine, None);
-        debug_line("    perturb+refine", stages.perturb, None);
-        debug_line("    oklab", stages.oklab, None);
+        ));
+        timings.push(("  solve", cpu_solve, None));
+        timings.push(("    feature", stages.feature, None));
+        timings.push(("    greedy+refine", stages.greedy + stages.refine, None));
+        timings.push(("    perturb+refine", stages.perturb, None));
+        timings.push(("    oklab", stages.oklab, None));
         if needs_canvas {
-            debug_line(
+            timings.push((
                 "interleave",
                 t_interleave,
                 Some(format!("{} column strips -> canvas", layout.columns)),
-            );
+            ));
         }
         if config.render.is_some() {
-            debug_line("render png", t_render, None);
+            timings.push(("render png", t_render, None));
         }
         if let Some((pw, ph, preview_png, original_jpeg, t_preview, t_encode)) = &previews {
-            debug_line(
+            timings.push((
                 "preview",
                 *t_preview,
                 Some(format!("wall + original -> {pw}x{ph}")),
-            );
-            debug_line(
+            ));
+            timings.push((
                 "  encode",
                 *t_encode,
                 Some(format!(
@@ -637,7 +737,7 @@ fn run(config: &Config) {
                     memory::format_bytes(preview_png.len()),
                     memory::format_bytes(original_jpeg.len())
                 )),
-            );
+            ));
         }
         let schematic_sizes = [(".schem", &schem_bytes), (".litematic", &litematic_bytes)]
             .into_iter()
@@ -645,60 +745,106 @@ fn run(config: &Config) {
             .map(|(format, bytes)| format!("{} {format}", memory::format_bytes(bytes.len())))
             .collect::<Vec<_>>()
             .join(" + ");
-        debug_line(
-            "schematics",
-            t_schematic,
-            Some(format!("{schematic_sizes}, gzipped")),
-        );
-        if let Some(page) = &page {
-            debug_line("html", t_html, Some(memory::format_bytes(page.len())));
+        if !schematic_sizes.is_empty() {
+            timings.push((
+                "schematics",
+                t_schematic,
+                Some(format!("{schematic_sizes}, gzipped")),
+            ));
         }
-        debug_line("total", started.elapsed(), None);
-        println!(
-            "{}: {:<18} {:.3} OKLab dE per cell, {:.4} mean OKLab dE per pixel",
-            "debug".blue().bold(),
-            "error",
-            mean_err,
-            total_lab / n_cells as f64
-        );
-        println!(
-            "{}: {:<18} peak {}, still live {}",
-            "debug".blue().bold(),
+        if let Some(page) = &page {
+            timings.push(("html", t_html, Some(memory::format_bytes(page.len()))));
+        }
+        timings.push(("total", started.elapsed(), None));
+
+        for (stage, d, note) in &timings {
+            let note = note.as_ref().map(|n| format!("   {n}")).unwrap_or_default();
+            debug_print(format!("{stage:<18} {:>9.3} s{note}", d.as_secs_f64()));
+        }
+        debug_print(format!(
+            "{:<18} {err_per_cell:.3} OKLab dE per cell, {lab_per_pixel:.4} mean OKLab dE per pixel",
+            "error"
+        ));
+        debug_print(format!(
+            "{:<18} peak {}, still live {}",
             "memory",
             memory::format_bytes(memory::peak_bytes()),
             memory::format_bytes(memory::live_bytes())
-        );
+        ));
+    }
+
+    if logger::mode() == Mode::Json {
+        let mut summary = json!({
+            "ok": true,
+            "schema_version": SCHEMA_VERSION,
+            "output": {
+                "path": config.output.display().to_string(),
+                "format": format_name(config.format),
+                "bytes": bytes.len(),
+            },
+            "render": config.render.as_ref().zip(render_bytes).map(|(path, bytes)| json!({
+                "path": path.display().to_string(),
+                "bytes": bytes,
+            })),
+            "input": {
+                "path": config.input.display().to_string(),
+                "width": src_w,
+                "height": src_h,
+            },
+            "wall": {
+                "columns": layout.columns,
+                "banner_rows": layout.rows,
+                "block_rows": layout.rows + 1,
+                "banners": n_cells,
+                "width_px": layout.wall_width,
+                "height_px": layout.wall_height,
+            },
+            "settings": config.settings_json(rayon::current_num_threads()),
+            "materials": json_export::materials(&wall),
+            "quality": {
+                "delta_e_per_cell": err_per_cell,
+                "mean_delta_e_per_pixel": lab_per_pixel,
+            },
+        });
+        if config.debug {
+            let seconds: Map<String, Value> = timings
+                .iter()
+                .map(|(stage, d, _)| (stage.trim().to_string(), json!(d.as_secs_f64())))
+                .collect();
+            summary["timings"] = Value::Object(seconds);
+            summary["memory"] = json!({
+                "peak_bytes": memory::peak_bytes(),
+                "live_bytes": memory::live_bytes(),
+            });
+        }
+        summary["warnings"] = json!(logger::warnings());
+        logger::print_result(&summary);
     }
 }
 
 fn encode(data: &[u8], width: usize, height: usize, format: image::ImageFormat) -> Vec<u8> {
     let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
-        .unwrap_or_else(|| error_out!("internal error: image buffer has the wrong size"));
+        .unwrap_or_else(|| internal("image buffer has the wrong size"));
     let mut out = std::io::Cursor::new(Vec::new());
     img.write_to(&mut out, format)
-        .unwrap_or_else(|e| error_out!("could not encode {format:?}: {e}"));
+        .unwrap_or_else(|e| internal(format!("could not encode {format:?}: {e}")));
     out.into_inner()
 }
 
-fn write_png(path: &Path, data: &[u8], width: usize, height: usize) {
+/// Write the wall render and return the file's size in bytes.
+fn write_png(path: &Path, data: &[u8], width: usize, height: usize) -> u64 {
     let img = image::RgbImage::from_raw(width as u32, height as u32, data.to_vec())
-        .unwrap_or_else(|| error_out!("internal error: canvas has the wrong size"));
-    img.save(path).unwrap_or_else(|e| {
-        error_out!(
-            "could not write '{}': {}",
-            path.display().to_string().yellow(),
-            e.to_string().red()
-        );
-    });
+        .unwrap_or_else(|| internal("canvas has the wrong size"));
+    img.save(path).unwrap_or_else(|e| write_failed(path, e));
+    std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
-fn debug_line(stage: &str, d: Duration, note: Option<String>) {
-    let note = note.map(|n| format!("   {n}")).unwrap_or_default();
-    println!(
-        "{}: {:<18} {:>9.3} s{}",
-        "debug".blue().bold(),
-        stage,
-        d.as_secs_f64(),
-        note
-    );
+fn write_failed(path: &Path, e: impl std::fmt::Display) -> ! {
+    fatal(
+        Diagnostic::new(
+            Kind::WriteError,
+            format!("could not write '{}': {e}", path.display()),
+        )
+        .path(path.display()),
+    )
 }

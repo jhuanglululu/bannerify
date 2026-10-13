@@ -20,7 +20,7 @@ use rayon::prelude::*;
 use rust_embed::Embed;
 
 use crate::geometry::{BANNER_H, BANNER_W, NTOP_HW, TOP_HW};
-use crate::logger::error_out;
+use crate::logger::internal;
 use crate::simd::Chunk;
 
 #[derive(Embed)]
@@ -52,11 +52,8 @@ impl Patterns {
     }
 }
 
-/// Decode the embedded patterns, dropping every id in `exclude`.
-///
-/// An id in `exclude` that names no pattern is a user mistake, not a silent
-/// no-op: it exits with the list.
-pub fn load(exclude: &HashSet<String>) -> Patterns {
+/// Every embedded pattern id, sorted.
+pub fn ids() -> Vec<String> {
     // rust-embed's iteration order follows the directory walk; sort so the
     // pattern indices (and therefore every tie-break in the solver) are the
     // same on every machine and every run.
@@ -64,22 +61,18 @@ pub fn load(exclude: &HashSet<String>) -> Patterns {
         .filter_map(|p| p.strip_suffix(".png").map(str::to_string))
         .collect();
     all.sort_unstable();
+    all
+}
 
-    let unknown: Vec<&str> = exclude
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !all.iter().any(|name| name == id))
+/// Decode the embedded patterns, dropping every id in `exclude`.
+///
+/// `exclude` has already been checked against [`ids`] by the config
+/// validation, which also refuses to exclude every pattern.
+pub fn load(exclude: &HashSet<String>) -> Patterns {
+    let names: Vec<String> = ids()
+        .into_iter()
+        .filter(|id| !exclude.contains(id))
         .collect();
-    if !unknown.is_empty() {
-        let mut unknown = unknown;
-        unknown.sort_unstable();
-        error_out!("unknown pattern id(s): {}", unknown.join(", "));
-    }
-
-    let names: Vec<String> = all.into_iter().filter(|id| !exclude.contains(id)).collect();
-    if names.is_empty() {
-        error_out!("every banner pattern was excluded — nothing left to solve with");
-    }
 
     let decoded: Vec<Chunk<TOP_HW>> = names.par_iter().map(|id| decode(id)).collect();
 
@@ -99,12 +92,14 @@ pub fn load(exclude: &HashSet<String>) -> Patterns {
 
 fn decode(id: &str) -> Chunk<TOP_HW> {
     let file = PatternAssets::get(&format!("{id}.png"))
-        .unwrap_or_else(|| error_out!("internal error: pattern '{id}' vanished from the binary"));
+        .unwrap_or_else(|| internal(format!("pattern '{id}' vanished from the binary")));
     let img = image::load_from_memory_with_format(&file.data, image::ImageFormat::Png)
-        .unwrap_or_else(|e| error_out!("could not decode pattern '{id}': {e}"));
+        .unwrap_or_else(|e| internal(format!("could not decode pattern '{id}': {e}")));
 
     if img.dimensions() != (BANNER_W as u32, BANNER_H as u32) {
-        error_out!("pattern '{id}' is not {BANNER_W}x{BANNER_H} pixels");
+        internal(format!(
+            "pattern '{id}' is not {BANNER_W}x{BANNER_H} pixels"
+        ));
     }
 
     const INV_255: f32 = 1.0 / 255.0;
