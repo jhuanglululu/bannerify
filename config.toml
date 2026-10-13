@@ -12,14 +12,14 @@
 
 # * Output Options *
 
-# output format: "html" (default), "schem", or "litematic"
-# schematic formats write directly to the output path without HTML
+# output format: "html" (default), "schem", "litematic", or "json"
+# schematic and json formats write directly to the output path without HTML
 # format = "html"
 
 # largest dimension of the preview images embedded in the HTML export
 # default is the banner wall's own size (no resize after the solve); either
 # way it is never larger than the banner wall itself
-# has no effect when the output format is schem or litematic
+# has no effect when the output format is schem, litematic or json
 # preview = 1200
 
 # also write the full-resolution banner wall to this PNG path

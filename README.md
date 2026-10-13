@@ -51,11 +51,17 @@ bannerify input.jpg output.litematic --row 20 --format litematic
 `--format html` is the default and includes both schematic downloads in the
 report. The output path is used exactly as supplied; its extension does not
 select the format. You can also set `format = "schem"` (or `"html"` /
-`"litematic"`) in a TOML config passed with `--config`; the CLI flag takes
-precedence.
+`"litematic"` / `"json"`) in a TOML config passed with `--config`; the CLI
+flag takes precedence.
+
+`--format json` writes the solved wall as data for other programs: every
+banner (row-major, 0-based from the top-left) with its base color, pattern
+layers and `/give` command, the background block grid (one row taller than
+the banners; banner `(r, c)` hangs on block `(r, c)`), and the materials. Ids
+are unprefixed Minecraft ids.
 
 `--render wall.png` can additionally save a PNG in any mode. `--preview` only
-affects HTML and has no effect on schematic output.
+affects HTML and has no effect on other output.
 
 ### Quality knobs
 
@@ -102,6 +108,8 @@ bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debri
   (e.g. patterns you can't craft).
 - `-B, --exclude-blocks` — block ids the background matcher may not pick.
 
+`bannerify --list patterns` (or `blocks`, `dyes`) prints every valid id.
+
 ### Output extras
 
 - `--preview PIXELS` — largest dimension of the images embedded in the
@@ -119,6 +127,29 @@ bannerify input.jpg output.html --row 20 -f config.toml
 
 See [`config.toml`](config.toml) in this repo for a commented example of
 every key.
+
+### Scripting and LLM use
+
+Log lines (`info:`, `warning:`, `error:`) go to stderr; stdout carries only
+results. `-q, --quiet` keeps only warnings and errors.
+
+`--json` prints exactly one JSON object on stdout instead — on success the
+output file, wall size, effective settings, materials and an error score
+(plus timings with `--debug`); on failure every problem found, each with a
+`kind`, a `message`, the flag or config key at fault, and suggestions where
+they apply:
+
+```sh
+$ bannerify input.jpg out.html --row 0 -P glob --json
+{"ok":false,"schema_version":1,"errors":[
+  {"kind":"invalid_value","message":"--row must be at least 1 (got 0)","option":"--row","value":"0"},
+  {"kind":"unknown_id","message":"unknown pattern id 'glob'","option":"--exclude-patterns","value":"glob",
+   "suggestions":["globe"],"hint":"run `bannerify --list patterns` for every valid id"}],"warnings":[]}
+```
+
+Exit codes: `0` success, `2` invalid arguments or config file, `3` input
+image missing or unreadable, `4` output not writable, `5` CPU lacks
+AVX2+FMA, `1` internal error.
 
 ### Everything else
 
