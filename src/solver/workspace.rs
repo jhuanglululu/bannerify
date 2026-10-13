@@ -494,11 +494,8 @@ mod tests {
         let solution = ws.solve(LAYERS, &cfg, &mut Rng::new(0, 0));
 
         let lab = |px: [f32; 3]| {
-            let (l, a, b) = srgb_to_oklab(
-                F32s::splat(px[0]),
-                F32s::splat(px[1]),
-                F32s::splat(px[2]),
-            );
+            let (l, a, b) =
+                srgb_to_oklab(F32s::splat(px[0]), F32s::splat(px[1]), F32s::splat(px[2]));
             [l.to_array()[0], a.to_array()[0], b.to_array()[0]]
         };
 

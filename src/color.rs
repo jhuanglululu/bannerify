@@ -185,7 +185,8 @@ fn build_snap_lut() -> Box<[u8; SNAP_ENTRIES]> {
         }
     }
 
-    out.try_into().expect("the Vec was allocated at that length")
+    out.try_into()
+        .expect("the Vec was allocated at that length")
 }
 
 #[cfg(test)]

@@ -8,9 +8,9 @@
 //! [`Progress::finish`] joins the watcher and erases the line before the
 //! summary `info!` lines print, so a half-drawn bar never collides with them.
 
-use std::io::{stderr, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::io::{IsTerminal, Write, stderr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 

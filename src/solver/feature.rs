@@ -370,7 +370,6 @@ fn argmax_sub(a: &[f32], b: &[f32]) -> (usize, f32) {
     best
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -550,7 +549,10 @@ mod tests {
         let pats = patterns();
         let visible = Map {
             base: dye("black"),
-            layers: [Some((index_of(&pats, "half_vertical"), dye("yellow"))), None],
+            layers: [
+                Some((index_of(&pats, "half_vertical"), dye("yellow"))),
+                None,
+            ],
         };
         let start = TOP_HW - NTOP_HW;
 
