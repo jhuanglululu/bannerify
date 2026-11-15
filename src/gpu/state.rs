@@ -202,8 +202,10 @@ impl Buffers {
 /// `cells` cells to solve and at most `slots_per_cell` slots per cell in any
 /// one refine.
 ///
-/// Cell inputs take at most a quarter of the budget; slot state gets the rest.
-/// Both are capped at what the work can use, so a small call allocates little.
+/// Cell inputs take at most a quarter of the budget, and never so much that
+/// one slot no longer fits; slot state gets the rest. Both are capped at what
+/// the work can use, so a small call allocates little. Succeeds whenever
+/// `budget` is at least [`super::min_memory_budget`] for this shape.
 pub(super) fn capacity(
     shape: &Shape,
     budget: usize,
@@ -211,7 +213,10 @@ pub(super) fn capacity(
     slots_per_cell: usize,
 ) -> Result<(usize, usize), GpuError> {
     let slot_bytes = shape.slot_bytes();
-    let cells_cap = cells.min(budget / 4 / CELL_BYTES).max(1);
+    let cells_cap = cells
+        .min(budget / 4 / CELL_BYTES)
+        .min(budget.saturating_sub(slot_bytes) / CELL_BYTES)
+        .max(1);
     let rest = budget.saturating_sub(cells_cap * CELL_BYTES);
     let slots_cap = (rest / slot_bytes).min(cells_cap * slots_per_cell);
     if slots_cap == 0 {

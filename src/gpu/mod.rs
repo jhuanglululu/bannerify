@@ -48,17 +48,20 @@ mod state;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use crate::cli::config::RefinementConfig;
 use crate::geometry::{NTOP_HW, TOP_HW};
 use crate::pattern::Patterns;
 use crate::solver::{Backend, PreparedCell, Rng, Solution, SolveCfg, Stages, Workspace};
 use crate::solver::{feature, perturb, refine};
 
 use metal::{Gpu, Kernel};
-use state::{Buffers, CELL_PLANES, PLANE, Shape, Slot, Sol};
+use state::{Buffers, CELL_BYTES, CELL_PLANES, PLANE, Shape, Slot, Sol};
 
 /// Why the backend could not start (or allocate).
 #[derive(Debug)]
@@ -92,6 +95,31 @@ impl std::error::Error for GpuError {}
 /// solves in one batch.
 const DEFAULT_BUDGET: usize = 2 << 30;
 
+/// The smallest memory budget ([`MetalBackend::with_memory_budget`]) the
+/// backend can solve cells of up to `max_layers` layers in, with `n_patterns`
+/// patterns and these refinement settings: the input of one cell plus the
+/// state of one slot. Any budget at least this large works; a larger one only
+/// means fewer, larger batches.
+pub fn min_memory_budget(
+    n_patterns: usize,
+    refinement: &RefinementConfig,
+    max_layers: usize,
+) -> usize {
+    CELL_BYTES + shape(n_patterns, refinement, max_layers).slot_bytes()
+}
+
+/// The buffer shape a solve with these settings runs in.
+fn shape(n_pat: usize, refinement: &RefinementConfig, max_layers: usize) -> Shape {
+    let cand = refinement.refinement_candidate.max(1);
+    Shape {
+        n_pat,
+        cand,
+        n_exact: refinement.exact_candidates.min(cand * n_pat),
+        window: refinement.window_size.max(1),
+        max_layers,
+    }
+}
+
 /// The Metal implementation of [`Backend`].
 ///
 /// [`Backend::solve`] has no error channel, so it panics if a buffer cannot be
@@ -109,6 +137,8 @@ pub struct MetalBackend {
     peak: usize,
     /// Batches (refines of a set of slots) run so far.
     batches: usize,
+    /// Solved-banner counter behind the progress bar, if any.
+    progress: Option<Arc<AtomicUsize>>,
 }
 
 /// One slot's result as read back: the refined solution, the error it is
@@ -132,7 +162,25 @@ impl MetalBackend {
             profile: None,
             peak: 0,
             batches: 0,
+            progress: None,
         })
+    }
+
+    /// Count solved cells into `counter` as the work proceeds: a share of a
+    /// chunk's cells after its initial solve and after each perturbation round,
+    /// so the count reaches the chunk's size once the chunk is done.
+    pub fn with_progress(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.progress = Some(counter);
+        self
+    }
+
+    /// Advance the progress counter to `part` of `parts` equal shares of a
+    /// chunk of `cells` cells, from `part - 1` shares.
+    fn report(&self, cells: usize, part: usize, parts: usize) {
+        if let Some(counter) = &self.progress {
+            let share = cells * part / parts - cells * (part - 1) / parts;
+            counter.fetch_add(share, Ordering::Relaxed);
+        }
     }
 
     /// Cap the solver's GPU buffers at `bytes`; work beyond it is split into
@@ -203,15 +251,11 @@ impl Backend for MetalBackend {
         if cells.is_empty() {
             return Vec::new();
         }
-        let n_pat = cfg.patterns.len();
-        let cand = cfg.refinement.refinement_candidate.max(1);
-        let shape = Shape {
-            n_pat,
-            cand,
-            n_exact: cfg.refinement.exact_candidates.min(cand * n_pat),
-            window: cfg.refinement.window_size.max(1),
-            max_layers: cells.iter().map(|c| c.n_layers).max().unwrap_or(0),
-        };
+        let shape = shape(
+            cfg.patterns.len(),
+            cfg.refinement,
+            cells.iter().map(|c| c.n_layers).max().unwrap_or(0),
+        );
         let slots_per_cell = cfg
             .perturbations
             .map_or(1, |(top_n, dup, _)| (top_n * dup).max(1));
@@ -262,6 +306,9 @@ impl MetalBackend {
         let initial: Vec<(usize, Option<&Solution>)> =
             (0..cells.len()).map(|i| (i, None)).collect();
         let first = self.run_slots(cells, nl, cfg, &initial, refining);
+        // Progress in equal shares: the initial solve, then one per round.
+        let parts = 1 + perturbs(cfg, nl).map_or(0, |(_, _, rounds)| rounds);
+        self.report(cells.len(), 1, parts);
 
         let solved = match perturbs(cfg, nl) {
             Some(p) => {
@@ -474,7 +521,7 @@ impl MetalBackend {
         let mut rngs: Vec<Rng> = cells.iter().map(|c| c.rng.clone()).collect();
         let mut pools: Vec<Vec<Scored>> = first.into_iter().map(|s| vec![s]).collect();
 
-        for _ in 0..rounds {
+        for round in 0..rounds {
             let mut trials: Vec<(usize, Solution)> = Vec::new();
             for (cell, (pool, rng)) in pools.iter().zip(&mut rngs).enumerate() {
                 for entry in pool {
@@ -497,6 +544,7 @@ impl MetalBackend {
                 pool.sort_by(|a, b| a.rank.partial_cmp(&b.rank).expect("no NaN errors"));
                 pool.truncate(top_n);
             }
+            self.report(cells.len(), round + 2, rounds + 1);
         }
 
         pools
