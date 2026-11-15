@@ -15,6 +15,7 @@ use super::workspace::{Plane, Solution, Workspace};
 
 /// A xorshift64\* stream: one per column work item. The state is `u64`
 /// arithmetic only, so every machine and backend draws the same sequence.
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {
