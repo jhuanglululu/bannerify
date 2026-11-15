@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::block;
-use crate::cli::{Args, OutputFormat};
+use crate::cli::{Args, BackendChoice, OutputFormat};
 use crate::layout::{Dimension, ResizingMethod};
 use crate::logger::{Diagnostic, Kind, fail, warn};
 use crate::pattern;
@@ -25,6 +25,9 @@ const DEFAULT_EXACT_CANDIDATES: usize = 20;
 const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
+
+/// Default GPU memory budget, in MiB: the Metal backend's own default.
+const DEFAULT_GPU_MEMORY: usize = 2048;
 
 /// The validated, merged configuration the pipeline runs on.
 pub struct Config {
@@ -51,6 +54,11 @@ pub struct Config {
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
     pub seed: u64,
+    /// The requested solver backend; `Auto` is resolved when the pipeline
+    /// starts.
+    pub backend: BackendChoice,
+    /// The GPU backend's memory budget, in MiB.
+    pub gpu_memory: usize,
 }
 
 /// Windowed beam refinement settings.
@@ -88,6 +96,8 @@ pub struct ConfigToml {
     pub seed: Option<u64>,
     pub preview: Option<usize>,
     pub render: Option<PathBuf>,
+    pub backend: Option<BackendChoice>,
+    pub gpu_memory: Option<usize>,
 }
 
 impl From<Args> for Config {
@@ -136,6 +146,19 @@ impl From<Args> for Config {
             "feature_weight",
         ));
         let perturbations = c.perturbations(&args.perturbations, config.perturbations);
+        let refinement = RefinementConfig {
+            refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
+            window_size,
+            error_threshold,
+            refinement_candidate: args
+                .refinement_candidate
+                .or(config.refinement_candidate)
+                .unwrap_or(5),
+            exact_candidates: args
+                .exact_candidates
+                .or(config.exact_candidates)
+                .unwrap_or(DEFAULT_EXACT_CANDIDATES),
+        };
         let preview = pick(args.preview, "--preview", config.preview, "preview");
         c.preview(preview);
         let exclude_patterns = c.exclude(
@@ -159,6 +182,20 @@ impl From<Args> for Config {
             &block::ids(),
             "block",
             "blocks",
+        );
+        let backend = args.backend.or(config.backend).unwrap_or_default();
+        let gpu_memory = pick(
+            args.gpu_memory,
+            "--gpu-memory",
+            config.gpu_memory,
+            "gpu_memory",
+        );
+        c.gpu_memory(
+            gpu_memory,
+            backend,
+            pattern::ids().len().saturating_sub(exclude_patterns.len()),
+            &refinement,
+            n_layers,
         );
 
         if !c.errors.is_empty() {
@@ -190,6 +227,15 @@ impl From<Args> for Config {
                 format!("{} has no effect without --perturbations", c.name(origin)),
             ));
         }
+        if let Some((_, origin)) = gpu_memory
+            && backend == BackendChoice::Cpu
+        {
+            warn(c.diag(
+                Kind::NoEffect,
+                origin,
+                format!("{} has no effect with --backend cpu", c.name(origin)),
+            ));
+        }
 
         Config {
             input,
@@ -204,30 +250,22 @@ impl From<Args> for Config {
             preview: preview.map(|(p, _)| p),
             render: args.render.or(config.render),
             n_layers: n_layers.unwrap_or(DEFAULT_LAYERS),
-            refinement: RefinementConfig {
-                refinement_pass: args.refinement_pass.or(config.refinement_pass).unwrap_or(2),
-                window_size,
-                error_threshold,
-                refinement_candidate: args
-                    .refinement_candidate
-                    .or(config.refinement_candidate)
-                    .unwrap_or(5),
-                exact_candidates: args
-                    .exact_candidates
-                    .or(config.exact_candidates)
-                    .unwrap_or(DEFAULT_EXACT_CANDIDATES),
-            },
+            refinement,
             feature_weight,
             perturbations,
             seed: seed.map_or(0, |(s, _)| s),
+            backend,
+            gpu_memory: gpu_memory.map_or(DEFAULT_GPU_MEMORY, |(m, _)| m),
         }
     }
 }
 
 impl Config {
     /// The effective settings, for the `--json` result: enough to repeat the
-    /// run. `workers` is the pool size actually used.
-    pub fn settings_json(&self, workers: usize) -> Value {
+    /// run. `workers` is the pool size actually used and `backend` the backend
+    /// that actually ran (`"cpu"` or `"gpu"`); `gpu_memory` is reported only
+    /// for the GPU backend, which is the only one that uses it.
+    pub fn settings_json(&self, workers: usize, backend: &str) -> Value {
         let (layout, fill) = match self.resizing_method {
             ResizingMethod::Fit => ("fit", None),
             ResizingMethod::Stretch => ("stretch", None),
@@ -260,6 +298,8 @@ impl Config {
             "exclude_patterns": sorted(&self.exclude_patterns),
             "exclude_blocks": sorted(&self.exclude_blocks),
             "preview": self.preview,
+            "backend": backend,
+            "gpu_memory": (backend == "gpu").then_some(self.gpu_memory),
         })
     }
 }
@@ -564,6 +604,47 @@ impl Checker {
         if let Some((0, origin)) = value {
             self.invalid(origin, 0, "at least 1");
         }
+    }
+
+    /// The GPU memory budget must be at least 1 MiB, and, where the GPU
+    /// backend can run at all, large enough for it to solve one cell with
+    /// these settings. The size check uses the largest layer count the range
+    /// allows, since the per-cell budgets are not known yet. It is skipped
+    /// under `--backend cpu`, which never uses the budget.
+    fn gpu_memory(
+        &mut self,
+        value: Option<(usize, Origin)>,
+        backend: BackendChoice,
+        n_patterns: usize,
+        refinement: &RefinementConfig,
+        n_layers: Option<(usize, usize)>,
+    ) {
+        let Some((mib, origin)) = value else {
+            return;
+        };
+        if mib < 1 {
+            self.invalid(origin, mib, "at least 1");
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if backend != BackendChoice::Cpu
+            && let Some((_, max_layers)) = n_layers
+        {
+            const MIB: usize = 1 << 20;
+            let needed = crate::gpu::min_memory_budget(n_patterns, refinement, max_layers);
+            if mib.saturating_mul(MIB) < needed {
+                self.invalid(
+                    origin,
+                    mib,
+                    format!(
+                        "at least {} MiB for these settings (one cell and one solver slot)",
+                        needed.div_ceil(MIB)
+                    ),
+                );
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (backend, n_patterns, refinement, n_layers);
     }
 
     /// An excluded id that names nothing is a user mistake, not a silent

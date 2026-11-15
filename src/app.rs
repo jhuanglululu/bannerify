@@ -28,10 +28,12 @@ use serde_json::{Map, Value, json};
 
 use crate::block::{self, Blocks};
 use crate::cli::config::{Config, format_name};
-use crate::cli::{Args, ListKind, OutputFormat};
+use crate::cli::{Args, BackendChoice, ListKind, OutputFormat};
 use crate::color::{COLOR_NAMES, NUM_COLORS};
 use crate::export::{Wall, color_label, hex, html, json as json_export, pattern_label, schematic};
 use crate::geometry::BLOCK_SIDE;
+#[cfg(target_os = "macos")]
+use crate::gpu::MetalBackend;
 use crate::layout::Layout;
 use crate::logger::{
     self, Diagnostic, Kind, Mode, SCHEMA_VERSION, debug_print, fatal, info, internal,
@@ -332,6 +334,106 @@ fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
         });
 }
 
+// ------------------------------------------------------------------- backend
+
+/// The backend the solve runs on, as resolved from `--backend`.
+enum Solver {
+    Cpu(CpuBackend),
+    #[cfg(target_os = "macos")]
+    Gpu(MetalBackend),
+}
+
+/// What `--debug` and `--json` report about the GPU backend after a run.
+struct GpuReport {
+    device: String,
+    batches: usize,
+    /// Largest device allocation, in bytes.
+    peak: usize,
+}
+
+impl Solver {
+    fn backend(&mut self) -> &mut dyn Backend {
+        match self {
+            Solver::Cpu(cpu) => cpu,
+            #[cfg(target_os = "macos")]
+            Solver::Gpu(gpu) => gpu,
+        }
+    }
+
+    /// The backend's name as `--backend` spells it.
+    fn name(&self) -> &'static str {
+        match self {
+            Solver::Cpu(_) => "cpu",
+            #[cfg(target_os = "macos")]
+            Solver::Gpu(_) => "gpu",
+        }
+    }
+
+    fn gpu_report(&self) -> Option<GpuReport> {
+        match self {
+            Solver::Cpu(_) => None,
+            #[cfg(target_os = "macos")]
+            Solver::Gpu(gpu) => Some(GpuReport {
+                device: gpu.device_name().to_string(),
+                batches: gpu.batches(),
+                peak: gpu.peak_allocated(),
+            }),
+        }
+    }
+}
+
+/// Why `--backend gpu` cannot run, as the error it exits with.
+fn gpu_unavailable(reason: impl std::fmt::Display) -> Diagnostic {
+    Diagnostic::new(
+        Kind::GpuUnavailable,
+        format!("the GPU backend is unavailable: {reason}"),
+    )
+    .hint("use --backend cpu, or --backend auto to fall back to the CPU")
+}
+
+/// Open the GPU backend if `--backend` asks for it: `None` means the CPU
+/// backend runs. Under `gpu` a failure is fatal (exit code 6); under `auto`
+/// it is a warning and the CPU backend runs instead.
+#[cfg(target_os = "macos")]
+fn open_gpu(config: &Config) -> Option<MetalBackend> {
+    if config.backend == BackendChoice::Cpu {
+        return None;
+    }
+    match MetalBackend::new() {
+        Ok(gpu) => Some(gpu.with_memory_budget(config.gpu_memory << 20)),
+        Err(e) if config.backend == BackendChoice::Gpu => fatal(gpu_unavailable(e)),
+        Err(e) => {
+            logger::warn(Diagnostic::new(
+                Kind::GpuUnavailable,
+                format!("the GPU backend is unavailable ({e}); solving on the CPU"),
+            ));
+            None
+        }
+    }
+}
+
+/// Without Metal there is no GPU backend: `--backend gpu` is fatal and
+/// `auto` is the CPU backend, without a warning.
+#[cfg(not(target_os = "macos"))]
+fn open_gpu(config: &Config) -> Option<std::convert::Infallible> {
+    if config.backend == BackendChoice::Gpu {
+        fatal(gpu_unavailable("it needs macOS (Metal)"));
+    }
+    None
+}
+
+/// The `--list backends` entry for the GPU backend.
+fn gpu_entry() -> Value {
+    #[cfg(target_os = "macos")]
+    let entry = match MetalBackend::new() {
+        Ok(gpu) => json!({"id": "gpu", "available": true, "device": gpu.device_name()}),
+        Err(e) => json!({"id": "gpu", "available": false, "reason": e.to_string()}),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let entry = json!({"id": "gpu", "available": false, "reason": "it needs macOS (Metal)"});
+    entry
+}
+
 // -------------------------------------------------------------------- driver
 
 /// Parse arguments, validate, and run the pipeline.
@@ -433,11 +535,17 @@ fn list(kind: ListKind) {
                 .map(|i| json!({"id": COLOR_NAMES[i], "name": color_label(i), "hex": hex(i)}))
                 .collect(),
         ),
+        ListKind::Backends => (
+            "backends",
+            vec![json!({"id": "cpu", "available": true}), gpu_entry()],
+        ),
     };
     if logger::mode() == Mode::Json {
         logger::print_result(&json!({"ok": true, "schema_version": SCHEMA_VERSION, key: entries}));
     } else {
-        for entry in &entries {
+        // Text lists only what can be used here: a backend this machine
+        // cannot run is left out.
+        for entry in entries.iter().filter(|e| e["available"] != false) {
             println!("{}", entry["id"].as_str().expect("every entry has an id"));
         }
     }
@@ -497,6 +605,13 @@ fn check_cpu_features() {}
 
 fn run(config: &Config) {
     let started = Instant::now();
+
+    // ---- the solver backend ------------------------------------------------
+    // Opened first, so `--backend gpu` on a machine without a usable GPU fails
+    // before any work is done.
+    let t = Instant::now();
+    let gpu = open_gpu(config);
+    let t_backend = t.elapsed();
 
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
@@ -593,15 +708,20 @@ fn run(config: &Config) {
         },
         seed: config.seed,
     };
-    let mut backend = CpuBackend::new(
-        max_layers,
-        config.refinement.refinement_candidate,
-        progress.counter(),
-    );
-    let (outcomes, cpu_resample, cpu_blocks) = render_wall(&ctx, &items, &mut backend);
-    let stages = backend.stages();
+    let mut solver = match gpu {
+        #[cfg(target_os = "macos")]
+        Some(gpu) => Solver::Gpu(gpu.with_progress(progress.counter())),
+        _ => Solver::Cpu(CpuBackend::new(
+            max_layers,
+            config.refinement.refinement_candidate,
+            progress.counter(),
+        )),
+    };
+    let (outcomes, cpu_resample, cpu_blocks) = render_wall(&ctx, &items, solver.backend());
+    let stages = solver.backend().stages();
     let t_pipeline = t.elapsed();
     progress.finish();
+    let gpu_report = solver.gpu_report();
 
     // ---- interleave the column strips into the canvas ----------------------
     let t = Instant::now();
@@ -613,8 +733,9 @@ fn run(config: &Config) {
     });
     let t_interleave = t.elapsed();
 
-    // The solver's CPU time is the sum of its stages.
-    let cpu_solve = stages.feature + stages.greedy + stages.refine + stages.perturb + stages.oklab;
+    // The solve time is the sum of the backend's stages: CPU time summed over
+    // the workers for the CPU backend, wall time for the GPU backend.
+    let t_solve = stages.feature + stages.greedy + stages.refine + stages.perturb + stages.oklab;
     // Reduce the per-cell errors now, so the outcomes can be consumed without
     // copying every cell's layer list.
     let total_err: f64 = outcomes
@@ -769,6 +890,14 @@ fn run(config: &Config) {
     // above it in the text form.
     let mut timings: Vec<(&str, Duration, Option<String>)> = Vec::new();
     if config.debug {
+        timings.push((
+            "backend",
+            t_backend,
+            Some(match &gpu_report {
+                Some(gpu) => format!("gpu, {}", gpu.device),
+                None => "cpu".to_string(),
+            }),
+        ));
         timings.push(("decode", t_decode, None));
         timings.push(("layout+tables", t_plan, None));
         timings.push(("variance", t_variance, None));
@@ -790,7 +919,21 @@ fn run(config: &Config) {
                 blocks.len()
             )),
         ));
-        timings.push(("  solve", cpu_solve, None));
+        timings.push((
+            "  solve",
+            t_solve,
+            Some(match &gpu_report {
+                Some(gpu) => format!(
+                    "GPU backend, wall time; {} batches, peak device memory {}",
+                    gpu.batches,
+                    memory::format_bytes(gpu.peak)
+                ),
+                None => format!(
+                    "CPU backend, CPU time summed over {} workers",
+                    rayon::current_num_threads()
+                ),
+            }),
+        ));
         timings.push(("    feature", stages.feature, None));
         timings.push(("    greedy+refine", stages.greedy + stages.refine, None));
         timings.push(("    perturb+refine", stages.perturb, None));
@@ -881,7 +1024,7 @@ fn run(config: &Config) {
                 "width_px": layout.wall_width,
                 "height_px": layout.wall_height,
             },
-            "settings": config.settings_json(rayon::current_num_threads()),
+            "settings": config.settings_json(rayon::current_num_threads(), solver.name()),
             "materials": json_export::materials(&wall),
             "quality": {
                 "delta_e_per_cell": err_per_cell,
@@ -898,6 +1041,13 @@ fn run(config: &Config) {
                 "peak_bytes": memory::peak_bytes(),
                 "live_bytes": memory::live_bytes(),
             });
+            if let Some(gpu) = &gpu_report {
+                summary["gpu"] = json!({
+                    "device": gpu.device,
+                    "batches": gpu.batches,
+                    "peak_device_bytes": gpu.peak,
+                });
+            }
         }
         summary["warnings"] = json!(logger::warnings());
         logger::print_result(&summary);

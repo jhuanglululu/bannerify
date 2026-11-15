@@ -69,6 +69,9 @@ pub enum Kind {
     WriteError,
     /// An AVX2 build on a CPU without AVX2+FMA.
     UnsupportedCpu,
+    /// The GPU backend could not be started: an error under `--backend gpu`,
+    /// a warning when `--backend auto` falls back to the CPU.
+    GpuUnavailable,
     /// A bug.
     Internal,
     /// Warning: an option was accepted but changes nothing.
@@ -87,6 +90,7 @@ impl Kind {
             Kind::InputError => 3,
             Kind::WriteError => 4,
             Kind::UnsupportedCpu => 5,
+            Kind::GpuUnavailable => 6,
             Kind::Internal | Kind::NoEffect => 1,
         }
     }

@@ -32,6 +32,21 @@ pub enum ListKind {
     Patterns,
     Blocks,
     Dyes,
+    /// The solver backends that can run on this machine
+    Backends,
+}
+
+/// Which solver backend runs the banner solve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendChoice {
+    /// The CPU solver, on every worker thread
+    Cpu,
+    /// The Metal GPU solver (macOS only); fails when no GPU can be used
+    Gpu,
+    /// The GPU when one can be used, otherwise the CPU
+    #[default]
+    Auto,
 }
 
 /// `bannerify <input> <output> [options]`
@@ -48,7 +63,8 @@ pub enum ListKind {
                        result object or the --list listing.\n\n\
                        Exit codes: 0 success, 2 invalid arguments or config file, \
                        3 input image missing or unreadable, 4 output not writable, \
-                       5 CPU lacks AVX2+FMA, 1 internal error."
+                       5 CPU lacks AVX2+FMA, 6 GPU backend unavailable \
+                       (--backend gpu), 1 internal error."
 )]
 pub struct Args {
     /// Input image path
@@ -112,6 +128,21 @@ pub struct Args {
     /// embedded in the HTML, whose preview is the downscaled one
     #[arg(long, value_name = "PATH")]
     pub render: Option<PathBuf>,
+
+    /// Solver backend [default: auto]: gpu solves on the Metal GPU (macOS
+    /// only), cpu on the processor, auto uses the GPU when one can be used and
+    /// the CPU otherwise. The two gave identical results on every run measured
+    /// on Apple Silicon
+    #[arg(help_heading = "Backend")]
+    #[arg(long, value_enum)]
+    pub backend: Option<BackendChoice>,
+
+    /// GPU memory budget for the solver's buffers, in MiB [default: 2048];
+    /// work that does not fit is split into more batches. Only used by the
+    /// GPU backend
+    #[arg(help_heading = "Backend")]
+    #[arg(long, value_name = "MIB")]
+    pub gpu_memory: Option<usize>,
 
     /// Fit image, preserving aspect ratio [default]
     #[arg(help_heading = "Layout")]
