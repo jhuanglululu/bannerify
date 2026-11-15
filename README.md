@@ -108,7 +108,8 @@ bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debri
   (e.g. patterns you can't craft).
 - `-B, --exclude-blocks` — block ids the background matcher may not pick.
 
-`bannerify --list patterns` (or `blocks`, `dyes`) prints every valid id.
+`bannerify --list patterns` (or `blocks`, `dyes`, `backends`) prints every
+valid id.
 
 ### Output extras
 
@@ -116,6 +117,32 @@ bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debri
   HTML (default: the banner wall's size). Smaller = smaller HTML file.
 - `--render PATH` — also write the full-resolution wall render to a PNG on
   disk (not embedded).
+
+### GPU backend
+
+On macOS the banner solve runs on the Metal GPU: greedy fill, refinement
+and perturbation run there, while resizing, block matching, the feature map
+and the exports stay on the CPU. On an M1 Pro with the 40-row example wall,
+the whole run takes 0.46 s instead of 1.7 s at the defaults and 4.3 s
+instead of 24 s with `-p 5 2 2 -R 4 -k 4`. In every run measured on Apple
+Silicon, the GPU backend gave the same output as the CPU backend, byte for
+byte.
+
+- `--backend auto` *(default)* — use the GPU when one can be used,
+  otherwise the CPU. On macOS a fallback to the CPU prints a warning with
+  the reason.
+- `--backend gpu` — use the GPU; if it cannot be used (no Metal device, or
+  not macOS), stop with exit code `6`.
+- `--backend cpu` — use the CPU solver on every worker thread.
+- `--gpu-memory MIB` — the memory budget for the GPU solver's buffers
+  (default `2048`). A smaller budget splits the work into more batches; a
+  value too small for the other settings is rejected.
+
+`bannerify --list backends` prints the backends this machine can run.
+`--debug` reports which backend ran, the GPU's name, the number of GPU
+batches and the peak device memory; with the GPU backend the solve times
+are wall time, with the CPU backend they are CPU time summed over the
+workers.
 
 ### Config file
 
@@ -149,7 +176,8 @@ $ bannerify input.jpg out.html --row 0 -P glob --json
 
 Exit codes: `0` success, `2` invalid arguments or config file, `3` input
 image missing or unreadable, `4` output not writable, `5` CPU lacks
-AVX2+FMA, `1` internal error.
+AVX2+FMA, `6` GPU backend unavailable (`--backend gpu`), `1` internal
+error.
 
 ### Everything else
 

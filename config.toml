@@ -10,6 +10,19 @@
 # keeping it blank is the most performance option
 # workers =
 
+# * Backend Options *
+
+# solver backend: "auto" (default), "gpu" or "cpu"
+# gpu solves on the Metal GPU (macOS only) and fails with exit code 6 when no
+# GPU can be used; cpu solves on the processor; auto uses the GPU when one can
+# be used and the CPU otherwise, with a warning on macOS
+# backend = "auto"
+
+# GPU memory budget for the solver's buffers, in MiB (default 2048)
+# work that does not fit is split into more batches; only the GPU backend
+# uses it, and too small a value for the other settings is an error
+# gpu_memory = 2048
+
 # * Output Options *
 
 # output format: "html" (default), "schem", "litematic", or "json"
