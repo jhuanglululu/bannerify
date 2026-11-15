@@ -1,5 +1,7 @@
 //! Cell I/O: gathering a cell's target patch out of a column band, and painting
-//! the solved composite back into the column's preview strip.
+//! the solved composite back into the column's preview strip. The composite is
+//! rebuilt from the [`Solution`] here ([`Compositor`]), so painting never reads
+//! solver state.
 //!
 //! Banner row `r` hangs at wall rows `r·24+4 .. r·24+44`, so every banner
 //! bridges a horizontal block seam and the row above draws over it. Row 0 owns
@@ -15,7 +17,8 @@ use crate::geometry::{
     VISIBLE_H, offset_column, offset_row,
 };
 use crate::resample::ColBand;
-use crate::solver::workspace::Plane;
+use crate::simd::Chunk;
+use crate::solver::workspace::{Plane, Solution, lane_offset, rebuild_prefixes};
 
 /// Channels in the preview canvas.
 const CHANNELS: usize = 3;
@@ -124,6 +127,33 @@ pub fn paint_block(strip: &mut [u8], row: usize, texture: &[u8; TEXTURE_BYTES]) 
 
 const _: () = assert!(TEXTURE_BYTES == BLOCK_SIDE * STRIP_PITCH);
 const _: () = assert!(BLOCK_PIXELS == BLOCK_SIDE * BLOCK_SIDE);
+
+/// Rebuilds a solved cell's composite from its [`Solution`]: the base colour,
+/// then each layer through the compositing step the solver itself uses
+/// ([`rebuild_prefixes`]), so the pixels match the solver's own composite
+/// exactly.
+#[derive(Default)]
+pub struct Compositor {
+    /// The composite after each layer; reused from cell to cell.
+    prefixes: Vec<[Plane; CHANNELS]>,
+}
+
+impl Compositor {
+    /// The composite of `solution` on banner row `row`'s patch, `alphas` being
+    /// the pattern planes the solution indexes. Only the row's active view
+    /// holds this cell's pixels.
+    pub fn composite(
+        &mut self,
+        solution: &Solution,
+        row: usize,
+        alphas: &[Plane],
+    ) -> &[Plane; CHANNELS] {
+        let n = solution.layers.len();
+        self.prefixes.resize(n + 1, [Chunk::zeroed(); CHANNELS]);
+        rebuild_prefixes(&mut self.prefixes, lane_offset(row), solution, alphas, n);
+        &self.prefixes[n]
+    }
+}
 
 /// Paint one solved cell's composite into its column strip.
 ///

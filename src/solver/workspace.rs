@@ -31,6 +31,13 @@ pub const LOWER_OFF: usize = (TOP_HW - NTOP_HW) / LANES;
 
 const _: () = assert!((TOP_HW - NTOP_HW).is_multiple_of(16));
 
+/// Lane offset of banner row `row`'s patch inside a [`Plane`]: `0` for the top
+/// row, [`LOWER_OFF`] for every other.
+#[inline]
+pub(super) fn lane_offset(row: usize) -> usize {
+    if row == 0 { 0 } else { LOWER_OFF }
+}
+
 /// The active lane view of a plane for a cell whose patch starts at lane `off`.
 #[inline]
 pub(super) fn view(plane: &Plane, off: usize) -> &[F32s] {
@@ -241,7 +248,7 @@ impl Workspace {
     /// Point the workspace at banner row `row`'s patch size. Call before
     /// gathering the cell's pixels.
     pub fn begin(&mut self, row: usize) {
-        self.off = if row == 0 { 0 } else { LOWER_OFF };
+        self.off = lane_offset(row);
         self.hw = TOP_HW - self.off * LANES;
     }
 
