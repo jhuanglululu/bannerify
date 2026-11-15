@@ -8,8 +8,8 @@
 //! [`super::workspace`]), so the assignment of cells to workers does not change
 //! the output.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
 
@@ -17,7 +17,7 @@ use super::batch::{Backend, PreparedCell};
 use super::workspace::{Solution, SolveCfg, Stages, Workspace};
 
 /// The existing CPU solver behind the [`Backend`] boundary.
-pub struct CpuBackend<'a> {
+pub struct CpuBackend {
     /// One workspace per rayon worker, indexed by
     /// [`rayon::current_thread_index`]. The lock is only ever taken by its own
     /// worker during a solve, and by [`Backend::stages`] between solves, so it
@@ -26,14 +26,14 @@ pub struct CpuBackend<'a> {
     /// while holding it.
     workspaces: Vec<Mutex<Workspace>>,
     /// Solved-banner counter behind the progress bar; bumped once per cell.
-    progress: &'a AtomicUsize,
+    progress: Arc<AtomicUsize>,
 }
 
-impl<'a> CpuBackend<'a> {
+impl CpuBackend {
     /// A backend for cells of up to `max_layers` layers and a beam of
     /// `candidates` (`--refinement-candidate`), with one workspace per worker
     /// of the current rayon pool.
-    pub fn new(max_layers: usize, candidates: usize, progress: &'a AtomicUsize) -> Self {
+    pub fn new(max_layers: usize, candidates: usize, progress: Arc<AtomicUsize>) -> Self {
         Self {
             workspaces: (0..rayon::current_num_threads())
                 .map(|_| Mutex::new(Workspace::new(max_layers, candidates)))
@@ -43,10 +43,10 @@ impl<'a> CpuBackend<'a> {
     }
 }
 
-impl Backend for CpuBackend<'_> {
+impl Backend for CpuBackend {
     fn solve(&mut self, cells: &[PreparedCell], cfg: &SolveCfg<'_>) -> Vec<Solution> {
         let workspaces = &self.workspaces;
-        let progress = self.progress;
+        let progress = &self.progress;
         cells
             .par_iter()
             .map(|cell| {

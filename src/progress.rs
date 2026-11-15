@@ -1,8 +1,9 @@
 //! A single-line stderr progress bar for the solve.
 //!
-//! The rayon workers never touch the terminal: they bump one shared
-//! `AtomicUsize` per solved banner, and a watcher thread redraws the line on a
-//! 100 ms tick — one writer, no per-cell I/O cost, no interleaved output. The
+//! The solver backend never touches the terminal: it adds solved banners to
+//! one shared `AtomicUsize` (the CPU backend one per banner, the GPU backend a
+//! share of each batch), and a watcher thread redraws the line on a 100 ms
+//! tick — one writer, no per-cell I/O cost, no interleaved output. The
 //! bar only exists when stderr is a terminal, so piped and CI runs stay clean.
 //!
 //! [`Progress::finish`] joins the watcher and erases the line before the
@@ -52,9 +53,9 @@ impl Progress {
         }
     }
 
-    /// The counter a worker bumps once per solved banner.
-    pub fn counter(&self) -> &AtomicUsize {
-        &self.count
+    /// The counter a backend bumps as banners are solved.
+    pub fn counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.count)
     }
 
     /// Stop the watcher and erase the line. Call before printing anything.
