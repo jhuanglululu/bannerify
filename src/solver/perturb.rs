@@ -165,3 +165,66 @@ fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut Rng) {
         layers[second] = (rng.below(n_patterns), rng.below(NUM_COLORS));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::geometry::TOP_HW;
+    use crate::pattern::load;
+
+    /// [`skip`] must leave the stream exactly where a real solve leaves it, or
+    /// every cell after the first in a column is solved with the wrong draws.
+    /// The configurations cover the pool hitting its `top_n` cap, several
+    /// rounds, a single layer (no count draw in [`reroll`]), no layers and no
+    /// perturbation at all (no draws), on both patch sizes.
+    #[test]
+    fn skip_leaves_the_stream_where_a_solve_leaves_it() {
+        let patterns = load(&HashSet::new());
+        let refinement = RefinementConfig {
+            refinement_pass: 1,
+            window_size: 2,
+            error_threshold: 0.7,
+            refinement_candidate: 3,
+            exact_candidates: 10,
+        };
+        let cases = [
+            (Some((2, 2, 1)), 4),
+            (Some((3, 2, 3)), 5),
+            (Some((1, 3, 2)), 1),
+            (Some((4, 1, 3)), 0),
+            (Some((0, 2, 2)), 4),
+            (None, 4),
+        ];
+
+        for (perturbations, n_layers) in cases {
+            for row in [0, 1] {
+                let cfg = SolveCfg {
+                    patterns: &patterns,
+                    refinement: &refinement,
+                    perturbations,
+                    feature_weight: 0.0,
+                };
+                let mut ws = Workspace::new(5, refinement.refinement_candidate);
+                ws.begin(row);
+                for (ch, plane) in ws.target_mut().iter_mut().enumerate() {
+                    for i in 0..TOP_HW {
+                        plane[i] = ((i * (ch + 3)) % 251) as f32;
+                    }
+                }
+
+                let mut solved = Rng::new(7, 3);
+                ws.solve(n_layers, &cfg, &mut solved);
+                let mut skipped = Rng::new(7, 3);
+                skip(&mut skipped, &cfg, n_layers);
+
+                assert_eq!(
+                    solved.next_u64(),
+                    skipped.next_u64(),
+                    "{perturbations:?}, {n_layers} layers, row {row}"
+                );
+            }
+        }
+    }
+}
