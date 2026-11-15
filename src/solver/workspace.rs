@@ -1,5 +1,5 @@
-//! The per-work-item solver workspace: every buffer a cell solve touches, in
-//! one allocation, reused down the column.
+//! The solver workspace: every buffer a cell solve touches, in one
+//! allocation, reused for every cell one worker solves.
 //!
 //! Every plane is a full top-row [`Plane`], and a lower banner row solves on
 //! the lane-aligned tail view of it (elements `TOP_HW - NTOP_HW ..`), so the
@@ -132,7 +132,7 @@ impl Beam {
     }
 }
 
-/// CPU time a work item spent in each solver stage, summed over its cells.
+/// CPU time spent in each solver stage, summed over the cells solved.
 #[derive(Clone, Copy, Default)]
 pub struct Stages {
     /// Greedy fill.
@@ -172,7 +172,7 @@ pub struct SolveCfg<'a> {
     pub feature_weight: f32,
 }
 
-/// Reusable solver buffers for one work item.
+/// Reusable solver buffers for one worker.
 pub struct Workspace {
     /// Lane offset of the current cell's patch: `0` or [`LOWER_OFF`].
     pub(super) off: usize,
@@ -216,7 +216,7 @@ pub struct Workspace {
     /// Scratch layer list: the refinement's "did this pass change anything"
     /// snapshot.
     pub(super) scratch: Vec<(usize, usize)>,
-    /// Per-stage CPU time, accumulated over the item's cells.
+    /// Per-stage CPU time, accumulated over the cells this workspace solved.
     pub stages: Stages,
 }
 

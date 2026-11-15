@@ -3,6 +3,7 @@
 pub mod batch;
 pub mod block;
 pub mod cell;
+pub mod cpu;
 pub mod feature;
 pub mod greedy;
 pub mod perturb;
@@ -11,5 +12,6 @@ pub mod variance;
 pub mod workspace;
 
 pub use batch::{Backend, PreparedCell};
+pub use cpu::CpuBackend;
 pub use perturb::Rng;
 pub use workspace::{Plane, Solution, SolveCfg, Stages, Workspace};
