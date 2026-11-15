@@ -1,19 +1,21 @@
 //! Perturbation rounds: kick the refined solution out of its local minimum and
 //! let the refinement machinery walk back down from somewhere else.
 //!
-//! Randomness comes from [`Rng`], one xorshift64\* stream per column work item,
-//! seeded from `(seed, column)`. The banner row never enters the seeding, so a
-//! column's draws are the same however the wall is cut into items, and a run is
-//! reproducible from `--seed`. Only this module touches the stream, so a run
-//! without `--perturbations` is independent of the seed.
+//! Randomness comes from [`Rng`], one xorshift64\* stream per block column,
+//! seeded from `(seed, column)` and advanced down the column's cells. The
+//! banner row never enters the seeding, so a column's draws are the same
+//! however the wall is cut into batches ([`skip`] positions each cell's
+//! stream before it is solved), and a run is reproducible from `--seed`. Only
+//! this module touches the stream, so a run without `--perturbations` is
+//! independent of the seed.
 
 use crate::cli::config::RefinementConfig;
 use crate::color::NUM_COLORS;
 
 use super::refine;
-use super::workspace::{Plane, Solution, Workspace};
+use super::workspace::{Plane, Solution, SolveCfg, Workspace};
 
-/// A xorshift64\* stream: one per column work item. The state is `u64`
+/// A xorshift64\* stream: one per block column. The state is `u64`
 /// arithmetic only, so every machine and backend draws the same sequence.
 #[derive(Clone)]
 pub struct Rng(u64);
@@ -50,6 +52,9 @@ impl Rng {
 
 /// Run the perturbation rounds, leaving `solution` the best found and the
 /// prefix chain consistent with it.
+///
+/// [`skip`] replays this function's draws without solving; a change to how
+/// many draws a round makes has to be made there too.
 // Everything here is forwarded to `refine`, which needs all of it; bundling the
 // arguments into a struct would only move the same list one level up.
 #[allow(clippy::too_many_arguments)]
@@ -63,7 +68,7 @@ pub(super) fn rounds(
     n: usize,
     rng: &mut Rng,
 ) {
-    if n == 0 || top_n == 0 || duplicates == 0 || rounds == 0 {
+    if draws_nothing(n, (top_n, duplicates, rounds)) {
         return;
     }
 
@@ -106,6 +111,42 @@ pub(super) fn rounds(
     // The last thing the loop refined was some other trial, so the prefix chain
     // belongs to it, not to the winner.
     super::workspace::rebuild_prefixes(&mut ws.prefixes, ws.off, solution, alphas, n);
+}
+
+/// Whether [`rounds`] returns before its first draw for a cell of `n` layers.
+fn draws_nothing(n: usize, (top_n, duplicates, rounds): (usize, usize, usize)) -> bool {
+    n == 0 || top_n == 0 || duplicates == 0 || rounds == 0
+}
+
+/// Advance `rng` past every draw [`rounds`] makes for a cell of `n_layers`
+/// layers, without solving the cell.
+///
+/// This works because the number and order of draws never depend on solver
+/// results: a round makes one [`reroll`] per (pool entry, duplicate), and the
+/// pool size after a round is `min(top_n, pool + trials)` whatever the trials
+/// scored. The draws themselves go through [`reroll`] on a scratch layer list,
+/// so the replay and the real rounds share one draw sequence and cannot drift
+/// apart. Lets the pipeline position each cell's stream before solving, so a
+/// cell's result does not depend on which batch it lands in.
+pub fn skip(rng: &mut Rng, cfg: &SolveCfg<'_>, n_layers: usize) {
+    // `Workspace::solve` runs the rounds only when perturbation is enabled.
+    let Some(perturbations @ (top_n, duplicates, rounds)) = cfg.perturbations else {
+        return;
+    };
+    if draws_nothing(n_layers, perturbations) {
+        return;
+    }
+    let n_patterns = cfg.patterns.top.len();
+    let mut layers = vec![(0, 0); n_layers];
+    // The pool starts as the incumbent alone.
+    let mut pool = 1;
+    for _ in 0..rounds {
+        let trials = pool * duplicates;
+        for _ in 0..trials {
+            reroll(&mut layers, n_patterns, rng);
+        }
+        pool = top_n.min(pool + trials);
+    }
 }
 
 /// Re-roll one or two distinct layers to a random `(pattern, dye)`.
