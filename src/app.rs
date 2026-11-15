@@ -340,7 +340,7 @@ fn interleave(canvas: &mut [u8], outcomes: &[ColOutcome], wall_width: usize) {
 enum Solver {
     Cpu(CpuBackend),
     #[cfg(target_os = "macos")]
-    Gpu(MetalBackend),
+    Gpu(Box<MetalBackend>),
 }
 
 /// What `--debug` and `--json` report about the GPU backend after a run.
@@ -356,7 +356,7 @@ impl Solver {
         match self {
             Solver::Cpu(cpu) => cpu,
             #[cfg(target_os = "macos")]
-            Solver::Gpu(gpu) => gpu,
+            Solver::Gpu(gpu) => gpu.as_mut(),
         }
     }
 
@@ -710,7 +710,7 @@ fn run(config: &Config) {
     };
     let mut solver = match gpu {
         #[cfg(target_os = "macos")]
-        Some(gpu) => Solver::Gpu(gpu.with_progress(progress.counter())),
+        Some(gpu) => Solver::Gpu(Box::new(gpu.with_progress(progress.counter()))),
         _ => Solver::Cpu(CpuBackend::new(
             max_layers,
             config.refinement.refinement_candidate,
