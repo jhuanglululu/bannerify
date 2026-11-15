@@ -55,7 +55,7 @@ use crate::simd::F32s;
 /// above. `powf` is not `const`, so the upper branch is evaluated as
 /// `x^2.4 = (x^12)^(1/5)` by Newton iteration on `y⁵ − x¹² = 0`, run to
 /// convergence in `f64`.
-const LINEARIZE: [f32; 256] = {
+pub(crate) const LINEARIZE: [f32; 256] = {
     let mut out = [0.0_f32; 256];
     let mut i = 0;
     while i < 256 {
@@ -97,14 +97,14 @@ const fn pow_2_4(x: f64) -> f64 {
 ///
 /// Held at `f64` so the published coefficients are transcribed exactly; every
 /// use narrows to `f32` at compile time.
-const M1: [[f64; 3]; 3] = [
+pub(crate) const M1: [[f64; 3]; 3] = [
     [0.4122214708, 0.5363325363, 0.0514459929],
     [0.2119034982, 0.6806995451, 0.1073969566],
     [0.0883024619, 0.2817188376, 0.6299787005],
 ];
 
 /// Cube-rooted LMS → OKLab (Ottosson's `M2`), row-major. See [`M1`].
-const M2: [[f64; 3]; 3] = [
+pub(crate) const M2: [[f64; 3]; 3] = [
     [0.2104542553, 0.7936177850, -0.0040720468],
     [1.9779984951, -2.4285922050, 0.4505937099],
     [0.0259040371, 0.7827717662, -0.8086757660],
