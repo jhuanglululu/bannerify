@@ -1,17 +1,23 @@
-//! Application entry point: the pipeline as one flat `par_iter` over block
+//! Application entry point: the pipeline in three phases over groups of block
 //! columns.
 //!
+//! 1. prepare (rayon over columns): resample the column band, match and paint
+//!    the background blocks, gather every banner cell's target into a
+//!    [`PreparedCell`];
+//! 2. solve: the group's cells go to a [`Backend`] as one batch;
+//! 3. paint (rayon over columns): each solution's composite is rebuilt on the
+//!    CPU and painted into its column strip.
+//!
 //! Columns, never rows: banners bridge every horizontal block seam, so no
-//! horizontal cut lets an item own complete block cells, while a vertical cut
-//! on a block-column boundary cuts nothing (banners never cross columns). The
-//! banner-over-banner overlap and the block-behind-banner compositing are then
-//! entirely internal to an item — no shared mutable state, no locking, no
-//! cross-item handoff.
+//! horizontal cut lets a column item own complete block cells, while a
+//! vertical cut on a block-column boundary cuts nothing (banners never cross
+//! columns). The banner-over-banner overlap and the block-behind-banner
+//! compositing are then entirely internal to a column — no shared mutable
+//! state, no locking, no cross-column handoff.
 
 use std::io::{IsTerminal, stderr};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -35,14 +41,21 @@ use crate::pattern;
 use crate::preview;
 use crate::progress::Progress;
 use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
+use crate::simd::Chunk;
 use crate::solver::block::{BlockScratch, match_cell};
-use crate::solver::cell::{BandView, STRIP_PITCH, paint_block, paint_cell};
+use crate::solver::cell::{BandView, Compositor, STRIP_PITCH, paint_block, paint_cell};
 use crate::solver::variance::{LayerGrid, layer_grid};
-use crate::solver::{Rng, Solution, SolveCfg, Stages, Workspace};
+use crate::solver::{Backend, CpuBackend, Plane, PreparedCell, Rng, Solution, SolveCfg, perturb};
 
 const CHANNELS: usize = 3;
 
 // ---------------------------------------------------------------- work items
+
+/// Banner cells prepared, solved and painted per column group: the bound on
+/// how many [`PreparedCell`]s (about 10 KB each) and solutions exist at once.
+/// Large enough that a group keeps every worker busy, small enough that a
+/// 15,000-banner wall never holds every cell's target at once.
+const GROUP_CELLS: usize = 4096;
 
 /// Where one column item's resampled pixels land in the wall canvas.
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +68,7 @@ struct Rect {
     width: usize,
 }
 
-/// One unit of parallel work: one block column of the wall.
+/// One unit of parallel prepare work: one block column of the wall.
 ///
 /// Carries only rects and indices — never a pixel payload. Everything else the
 /// closure needs is a shared borrow in [`ColContext`].
@@ -83,36 +96,37 @@ struct ColContext<'a> {
     blocks: &'a Blocks,
     /// Per-cell layer budget from the variance pre-pass.
     layers: &'a LayerGrid,
-    /// Largest budget in the grid — the size every workspace is built for.
-    max_layers: usize,
     /// The solver stages' shared configuration.
     solve: SolveCfg<'a>,
-    /// Perturbation RNG seed; each item derives its stream from it and its
+    /// Perturbation RNG seed; each column derives its stream from it and its
     /// column index.
     seed: u64,
-    /// Solved-banner counter behind the progress bar; bumped once per cell.
-    progress: &'a AtomicUsize,
 }
 
-/// What one column item produces.
+/// What preparing one column produces besides its cells.
+struct PreparedColumn {
+    /// One matched block index per *block* cell of the column — one more entry
+    /// than it has banner cells, because a wall of `rows` banner rows is
+    /// `rows + 1` blocks tall.
+    blocks: Vec<usize>,
+    /// The column's preview strip with the background blocks painted:
+    /// `wall_height` rows of [`STRIP_PITCH`] bytes.
+    strip: Vec<u8>,
+    /// CPU time spent resampling.
+    resample: Duration,
+    /// CPU time spent matching and painting background blocks.
+    blocks_cpu: Duration,
+}
+
+/// One finished column.
 struct ColOutcome {
     /// One entry per banner cell of the column, top to bottom.
     cells: Vec<Solution>,
-    /// One matched block index per *block* cell of the column — one more entry
-    /// than `cells`, because a wall of `rows` banner rows is `rows + 1` blocks
-    /// tall.
+    /// See [`PreparedColumn::blocks`].
     blocks: Vec<usize>,
-    /// The column's rendered preview strip: `wall_height` rows of
-    /// [`STRIP_PITCH`] bytes, interleaved into the canvas after the `par_iter`.
+    /// The column's rendered preview strip, banners over blocks, interleaved
+    /// into the canvas once every column is done.
     strip: Vec<u8>,
-    /// CPU time this item spent resampling.
-    resample: Duration,
-    /// CPU time this item spent matching and painting background blocks.
-    blocks_cpu: Duration,
-    /// CPU time this item spent solving and painting banner cells.
-    solve: Duration,
-    /// ...split by solver stage.
-    stages: Stages,
 }
 
 fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
@@ -146,18 +160,26 @@ fn col_items(layout: &Layout, plan: &Plan) -> Vec<ColItem> {
         .collect()
 }
 
-/// Produce one block column of the wall.
+/// Prepare one block column: resample its band, match and paint the blocks
+/// behind the banners, and write every banner cell, top to bottom, into
+/// `cells` (one entry per banner row). Every field of every entry is
+/// overwritten except the head of a lower row's target planes, which the
+/// solver never reads.
 ///
-/// The strip the item paints is its own local buffer rather than a slice of the
+/// The strip is the column's own local buffer rather than a slice of the
 /// canvas: the canvas is row-major, so a column of it is not a contiguous
 /// `&mut [u8]` and `split_at_mut` cannot hand one out. Painting locally and
 /// interleaving once keeps the whole pipeline in safe code.
 ///
-/// Blocks are painted first, over the whole strip, then banners over them.
-/// Nothing has to be composited, because the banners' visible regions tile
-/// exactly and the block pixels that survive are precisely the hollow frame the
-/// matcher scored ([`crate::block`]).
-fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
+/// Blocks are painted first, over the whole strip, and the banners over them
+/// later ([`paint_column`]). Nothing has to be composited, because the
+/// banners' visible regions tile exactly and the block pixels that survive are
+/// precisely the hollow frame the matcher scored ([`crate::block`]).
+fn prepare_column(
+    ctx: &ColContext<'_>,
+    item: &ColItem,
+    cells: &mut [PreparedCell],
+) -> PreparedColumn {
     let mut strip = vec![0u8; ctx.layout.wall_height * STRIP_PITCH];
 
     // The column's own band, resampled locally out of the source region
@@ -190,38 +212,103 @@ fn render_column(ctx: &ColContext<'_>, item: &ColItem) -> ColOutcome {
     }
     let blocks_cpu = t.elapsed();
 
-    // ---- the banners hanging on it -----------------------------------------
-    // Cells top to bottom, through one workspace. Banner row 0 has nothing
-    // hanging in front of it, so it solves the full 20x40 patch; every other row
-    // solves only its visible 24 rows — the lane-aligned tail of the same
-    // buffers (`crate::solver::workspace`), which is why one allocation serves
-    // both and nothing is re-zeroed between cells.
-    let t = Instant::now();
-    let mut cells = Vec::with_capacity(ctx.layout.rows);
-    let mut workspace = Workspace::new(ctx.max_layers, ctx.solve.refinement.refinement_candidate);
-    // One PRNG stream per column item, advanced down the column's cells: the
-    // banner row never enters the seeding, so the draws a cell sees depend only
-    // on the seed, the column and how many cells precede it.
+    // ---- the banner cells, ready to solve ----------------------------------
+    // Banner row 0 has nothing hanging in front of it, so it solves the full
+    // 20x40 patch; every other row solves only its visible 24 rows, the
+    // lane-aligned tail of the same planes (`crate::solver::workspace`).
+    //
+    // One PRNG stream per column, advanced down the column's cells: the banner
+    // row never enters the seeding, so the draws a cell sees depend only on the
+    // seed, the column and how many cells precede it. Each cell takes a copy of
+    // the stream as it stands, and the stream is then replayed past that
+    // cell's draws for the next one.
     let mut rng = Rng::new(ctx.seed, item.col as u64);
-    for row in 0..ctx.layout.rows {
-        workspace.begin(row);
-        view.gather(row, item.col, workspace.target_mut());
-        let solution = workspace.solve(ctx.layers.get(row, item.col), &ctx.solve, &mut rng);
-        paint_cell(&mut strip, row, workspace.composite());
-        cells.push(solution);
-        ctx.progress.fetch_add(1, Ordering::Relaxed);
+    for (row, cell) in cells.iter_mut().enumerate() {
+        cell.row = row;
+        cell.n_layers = ctx.layers.get(row, item.col);
+        view.gather(row, item.col, &mut cell.target);
+        cell.rng = rng.clone();
+        perturb::skip(&mut rng, &ctx.solve, cell.n_layers);
     }
-    let solve = t.elapsed();
 
-    ColOutcome {
-        cells,
+    PreparedColumn {
         blocks,
         strip,
         resample,
         blocks_cpu,
-        solve,
-        stages: workspace.stages,
     }
+}
+
+/// Paint one column's solved cells over its blocks.
+///
+/// The composites are rebuilt from the solutions here ([`Compositor`]), not
+/// taken from the backend, so every backend's results are painted through the
+/// same CPU compositing step.
+fn paint_column(strip: &mut [u8], cells: &[Solution], alphas: &[Plane]) {
+    let mut compositor = Compositor::default();
+    for (row, solution) in cells.iter().enumerate() {
+        paint_cell(strip, row, compositor.composite(solution, row, alphas));
+    }
+}
+
+/// Run the whole wall through prepare, solve and paint, one group of columns
+/// at a time, and return the finished columns left to right together with the
+/// prepare phase's resample and block-matching CPU times.
+///
+/// Each group is prepared in parallel over its columns, solved as one batch,
+/// then painted in parallel over its columns. Only one group's prepared cells
+/// exist at a time ([`GROUP_CELLS`]), in one buffer that every group reuses
+/// and each column writes its own slice of; the strips are kept for the final
+/// interleave.
+fn render_wall(
+    ctx: &ColContext<'_>,
+    items: &[ColItem],
+    backend: &mut dyn Backend,
+) -> (Vec<ColOutcome>, Duration, Duration) {
+    let rows = ctx.layout.rows;
+    let group_columns = (GROUP_CELLS / rows).max(1);
+    let mut outcomes = Vec::with_capacity(items.len());
+    let (mut resample, mut blocks_cpu) = (Duration::ZERO, Duration::ZERO);
+    let mut cells = Vec::new();
+
+    for group in items.chunks(group_columns) {
+        // ---- prepare -------------------------------------------------------
+        cells.resize_with(group.len() * rows, || PreparedCell {
+            row: 0,
+            n_layers: 0,
+            target: [Chunk::zeroed(); CHANNELS],
+            rng: Rng::new(0, 0),
+        });
+        let prepared: Vec<PreparedColumn> = group
+            .par_iter()
+            .zip(cells.par_chunks_mut(rows))
+            .map(|(item, cells)| prepare_column(ctx, item, cells))
+            .collect();
+        for column in &prepared {
+            resample += column.resample;
+            blocks_cpu += column.blocks_cpu;
+        }
+
+        // ---- solve ---------------------------------------------------------
+        let solutions = backend.solve(&cells, &ctx.solve);
+
+        // ---- paint ---------------------------------------------------------
+        let mut solutions = solutions.into_iter();
+        let mut finished: Vec<ColOutcome> = prepared
+            .into_iter()
+            .map(|PreparedColumn { blocks, strip, .. }| ColOutcome {
+                cells: solutions.by_ref().take(rows).collect(),
+                blocks,
+                strip,
+            })
+            .collect();
+        finished.par_iter_mut().for_each(|outcome| {
+            paint_column(&mut outcome.strip, &outcome.cells, &ctx.solve.patterns.top);
+        });
+        outcomes.extend(finished);
+    }
+
+    (outcomes, resample, blocks_cpu)
 }
 
 /// Copy every column strip into the wall canvas.
@@ -489,7 +576,7 @@ fn run(config: &Config) {
             .join(", ")
     );
 
-    // ---- the pipeline: one flat par_iter over block columns ----------------
+    // ---- the pipeline: prepare -> solve -> paint, per column group ---------
     let t = Instant::now();
     let progress = Progress::start(layout.rows * layout.columns);
     let ctx = ColContext {
@@ -498,7 +585,6 @@ fn run(config: &Config) {
         layout: &layout,
         blocks: &blocks,
         layers: &layers,
-        max_layers,
         solve: SolveCfg {
             patterns: &patterns,
             refinement: &config.refinement,
@@ -506,12 +592,14 @@ fn run(config: &Config) {
             feature_weight: config.feature_weight,
         },
         seed: config.seed,
-        progress: progress.counter(),
     };
-    let outcomes: Vec<ColOutcome> = items
-        .par_iter()
-        .map(|item| render_column(&ctx, item))
-        .collect();
+    let mut backend = CpuBackend::new(
+        max_layers,
+        config.refinement.refinement_candidate,
+        progress.counter(),
+    );
+    let (outcomes, cpu_resample, cpu_blocks) = render_wall(&ctx, &items, &mut backend);
+    let stages = backend.stages();
     let t_pipeline = t.elapsed();
     progress.finish();
 
@@ -525,16 +613,10 @@ fn run(config: &Config) {
     });
     let t_interleave = t.elapsed();
 
-    // Reduce the per-item stats now, so the outcomes can be consumed without
+    // The solver's CPU time is the sum of its stages.
+    let cpu_solve = stages.feature + stages.greedy + stages.refine + stages.perturb + stages.oklab;
+    // Reduce the per-cell errors now, so the outcomes can be consumed without
     // copying every cell's layer list.
-    let (cpu_resample, cpu_blocks, cpu_solve) = outcomes.iter().fold(
-        (Duration::ZERO, Duration::ZERO, Duration::ZERO),
-        |(r, b, s), o| (r + o.resample, b + o.blocks_cpu, s + o.solve),
-    );
-    let mut stages = Stages::default();
-    for outcome in &outcomes {
-        stages.add(&outcome.stages);
-    }
     let total_err: f64 = outcomes
         .iter()
         .flat_map(|o| o.cells.iter())
