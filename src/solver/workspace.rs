@@ -168,7 +168,7 @@ pub struct SolveCfg<'a> {
 /// Reusable solver buffers for one work item.
 pub struct Workspace {
     /// Lane offset of the current cell's patch: `0` or [`LOWER_OFF`].
-    pub(super) off: usize,
+    pub(crate) off: usize,
     /// Pixels the current cell solves.
     pub(super) hw: usize,
     /// Layers in the last [`Workspace::solve`] — which prefix is the composite.
@@ -180,7 +180,7 @@ pub struct Workspace {
     /// blend is written here, over the gathered pixels
     /// ([`super::feature::build`] explains why in place). Read the OKLab
     /// [`Workspace::lab_target`] for the real target — it is converted first.
-    pub(super) target: [Plane; 3],
+    pub(crate) target: [Plane; 3],
     /// Composite after `i` layers; `prefixes[0]` is the flat base colour.
     pub(super) prefixes: Vec<[Plane; 3]>,
     /// Affine map of layers `i..`; `suffixes[n]` is the identity.
@@ -190,12 +190,12 @@ pub struct Workspace {
     /// Scratch composite for refinement's exact rung.
     pub(super) cand: [Plane; 3],
     /// The target converted to OKLab, once per cell.
-    pub(super) lab_target: [Plane; 3],
+    pub(crate) lab_target: [Plane; 3],
     /// The cell's feature map — the idealised two-layer banner every rung is
     /// pulled towards ([`super::feature`]) — composited in sRGB.
     pub(super) feature: [Plane; 3],
     /// [`Workspace::feature`] in OKLab, for the exact rung.
-    pub(super) lab_feature: [Plane; 3],
+    pub(crate) lab_feature: [Plane; 3],
     /// Scratch for building the feature map.
     pub(super) feat: feature::Buffers,
     /// Perturbation beam: `(error, solution)`, kept sorted ascending.

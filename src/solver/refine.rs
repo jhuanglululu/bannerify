@@ -503,7 +503,7 @@ pub(super) fn composite(
 }
 
 /// The cell's target patch, converted to OKLab once per cell.
-pub(super) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usize) {
+pub(crate) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usize) {
     let (l, rest) = out.split_at_mut(1);
     let (a, b) = rest.split_at_mut(1);
     for (l, a, b, r, g, bl) in zip!(
