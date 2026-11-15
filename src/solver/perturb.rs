@@ -150,7 +150,7 @@ pub fn skip(rng: &mut Rng, cfg: &SolveCfg<'_>, n_layers: usize) {
 }
 
 /// Re-roll one or two distinct layers to a random `(pattern, dye)`.
-fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut Rng) {
+pub(crate) fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut Rng) {
     let n = layers.len();
     let count = if n > 1 { 1 + rng.below(2) } else { 1 };
 

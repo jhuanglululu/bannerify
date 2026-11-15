@@ -111,7 +111,7 @@ pub(super) struct Buffers {
 ///
 /// Only called with `lambda > 0`: at zero the whole pass is skipped, which is
 /// what makes the feature map a true no-op rather than a cheap one.
-pub(super) fn build(ws: &mut Workspace, alphas: &[Plane], lambda: f32) -> Map {
+pub(crate) fn build(ws: &mut Workspace, alphas: &[Plane], lambda: f32) -> Map {
     let Workspace {
         off,
         hw,
