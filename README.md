@@ -120,27 +120,52 @@ valid id.
 
 ### GPU backend
 
-On macOS the banner solve runs on the Metal GPU: greedy fill, refinement
-and perturbation run there, while resizing, block matching, the feature map
-and the exports stay on the CPU. On an M1 Pro with the 40-row example wall,
-the whole run takes 0.46 s instead of 1.7 s at the defaults and 4.3 s
-instead of 24 s with `-p 5 2 2 -R 4 -k 4`. In every run measured on Apple
-Silicon, the GPU backend gave the same output as the CPU backend, byte for
-byte.
+The banner solve runs on the GPU when one can be used: greedy fill,
+refinement and perturbation run there, while resizing, block matching, the
+feature map and the exports stay on the CPU. It works on NVIDIA, AMD and Intel
+GPUs through [wgpu](https://wgpu.rs) (Vulkan on Linux, Vulkan or DX12 on
+Windows) and on Apple GPUs through Metal. Linux needs the Vulkan loader
+(`libvulkan.so.1`, package `libvulkan1` on Debian and Ubuntu) next to the
+GPU driver.
 
-- `--backend auto` *(default)* — use the GPU when one can be used,
-  otherwise the CPU. On macOS a fallback to the CPU prints a warning with
-  the reason.
-- `--backend gpu` — use the GPU; if it cannot be used (no Metal device, or
-  not macOS), stop with exit code `6`.
+Whole-run times in seconds for a 2048x1152 image, on a Core Ultra 5 225
+with an RTX 3090 (wgpu on Vulkan) and on an M1 Pro:
+
+| rows | settings | 225 CPU | RTX 3090 | M1 Pro CPU | M1 Pro `metal` | M1 Pro `wgpu` |
+|---|---|---|---|---|---|---|
+| 20 | defaults | 0.30 | 0.29 | 0.56 | 0.20 | 0.21 |
+| 50 | defaults | 1.47 | 0.62 | 2.98 | 0.76 | 0.89 |
+| 100 | defaults | 5.63 | 1.55 | 11.7 | 2.62 | 2.87 |
+| 20 | `-p 5 2 2 -R 3 -F 0.1 -k 3` | 3.14 | 0.56 | 6.63 | 0.97 | 1.02 |
+| 50 | `-p 5 2 2 -R 3 -F 0.1 -k 3` | 17.8 | 1.61 | 36.8 | 4.48 | 4.87 |
+| 100 | `-p 5 2 2 -R 3 -F 0.1 -k 3` | 66.9 | 4.71 | 138 | 16.1 | 17.2 |
+
+The GPU only loses on a very small default wall (10 rows: 0.25 s against
+0.12 s on the RTX 3090 machine), where opening the device takes longer than
+the solve.
+
+The GPU matches the CPU's quality, not its exact banners. GPU arithmetic
+rounds differently in the last digit, and where two candidate banners are
+nearly tied the GPU may pick the other one: on a 50-row wall 12-24% of the
+banners differed from the CPU's while the mean error differed by less than
+0.1%. One device gives the same result every run for a given seed.
+
+- `--backend auto` *(default)* — use the GPU whenever one can be opened,
+  whatever the wall size or settings; otherwise solve on the CPU, with a
+  warning that gives the reason.
+- `--backend gpu` — use the GPU; if it cannot be used, stop with exit code
+  `6`.
 - `--backend cpu` — use the CPU solver on every worker thread.
+- `--backend metal`, `--backend wgpu` — use the GPU through that API. `gpu`
+  means `metal` on macOS and `wgpu` everywhere else; on macOS `wgpu` runs
+  too, on top of Metal. Software renderers are never used.
 - `--gpu-memory MIB` — the memory budget for the GPU solver's buffers
   (default `2048`). A smaller budget splits the work into more batches; a
   value too small for the other settings is rejected.
 
 `bannerify --list backends` prints the backends this machine can run.
-`--debug` reports which backend ran, the GPU's name, the number of GPU
-batches and the peak device memory; with the GPU backend the solve times
+`--debug` reports which backend and API ran, the GPU's name, the number of
+GPU batches and the peak device memory; with the GPU backend the solve times
 are wall time, with the CPU backend they are CPU time summed over the
 workers.
 
