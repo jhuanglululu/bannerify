@@ -32,7 +32,7 @@ use crate::cli::{Args, BackendChoice, ListKind, OutputFormat};
 use crate::color::{COLOR_NAMES, NUM_COLORS};
 use crate::export::{Wall, color_label, hex, html, json as json_export, pattern_label, schematic};
 use crate::geometry::BLOCK_SIDE;
-use crate::gpu::{GpuApi, GpuBackend};
+use crate::gpu::GpuBackend;
 use crate::layout::Layout;
 use crate::logger::{
     self, Diagnostic, Kind, Mode, SCHEMA_VERSION, debug_print, fatal, info, internal,
@@ -343,8 +343,6 @@ enum Solver {
 
 /// What `--debug` and `--json` report about the GPU backend after a run.
 struct GpuReport {
-    /// The GPU API's name as `--backend` spells it.
-    api: &'static str,
     device: String,
     batches: usize,
     /// Largest device allocation, in bytes.
@@ -371,7 +369,6 @@ impl Solver {
         match self {
             Solver::Cpu(_) => None,
             Solver::Gpu(gpu) => Some(GpuReport {
-                api: gpu.api().name(),
                 device: gpu.device_name().to_string(),
                 batches: gpu.batches(),
                 peak: gpu.peak_allocated(),
@@ -390,13 +387,15 @@ fn gpu_unavailable(reason: impl std::fmt::Display) -> Diagnostic {
 }
 
 /// Open the GPU backend if `--backend` asks for it: `None` means the CPU
-/// backend runs. Under `auto` a failure is a warning and the CPU backend runs
-/// instead; under every other GPU choice it is fatal (exit code 6).
+/// backend runs. Under `gpu` a failure is fatal (exit code 6); under `auto`
+/// it is a warning and the CPU backend runs instead.
 fn open_gpu(config: &Config) -> Option<GpuBackend> {
-    let api = config.backend.gpu_api()?;
-    match GpuBackend::open(api) {
+    if config.backend == BackendChoice::Cpu {
+        return None;
+    }
+    match GpuBackend::new() {
         Ok(gpu) => Some(gpu.with_memory_budget(config.gpu_memory << 20)),
-        Err(e) if config.backend != BackendChoice::Auto => fatal(gpu_unavailable(e)),
+        Err(e) if config.backend == BackendChoice::Gpu => fatal(gpu_unavailable(e)),
         Err(e) => {
             logger::warn(Diagnostic::new(
                 Kind::GpuUnavailable,
@@ -407,20 +406,12 @@ fn open_gpu(config: &Config) -> Option<GpuBackend> {
     }
 }
 
-/// The `--list backends` entries for the GPU backend: `gpu`, which is the
-/// platform's default API, then each API by name.
-fn gpu_entries() -> Vec<Value> {
-    let entry = |id: &str, api: GpuApi| match GpuBackend::open(api) {
-        Ok(gpu) => json!({
-            "id": id, "available": true, "api": api.name(), "device": gpu.device_name(),
-        }),
-        Err(e) => json!({
-            "id": id, "available": false, "api": api.name(), "reason": e.to_string(),
-        }),
-    };
-    let mut out = vec![entry("gpu", GpuApi::DEFAULT)];
-    out.extend(GpuApi::ALL.iter().map(|&api| entry(api.name(), api)));
-    out
+/// The `--list backends` entry for the GPU backend.
+fn gpu_entry() -> Value {
+    match GpuBackend::new() {
+        Ok(gpu) => json!({"id": "gpu", "available": true, "device": gpu.device_name()}),
+        Err(e) => json!({"id": "gpu", "available": false, "reason": e.to_string()}),
+    }
 }
 
 // -------------------------------------------------------------------- driver
@@ -526,9 +517,7 @@ fn list(kind: ListKind) {
         ),
         ListKind::Backends => (
             "backends",
-            std::iter::once(json!({"id": "cpu", "available": true}))
-                .chain(gpu_entries())
-                .collect(),
+            vec![json!({"id": "cpu", "available": true}), gpu_entry()],
         ),
     };
     if logger::mode() == Mode::Json {
@@ -884,7 +873,7 @@ fn run(config: &Config) {
             "backend",
             t_backend,
             Some(match &gpu_report {
-                Some(gpu) => format!("gpu ({}), {}", gpu.api, gpu.device),
+                Some(gpu) => format!("gpu, {}", gpu.device),
                 None => "cpu".to_string(),
             }),
         ));
@@ -1033,7 +1022,6 @@ fn run(config: &Config) {
             });
             if let Some(gpu) = &gpu_report {
                 summary["gpu"] = json!({
-                    "api": gpu.api,
                     "device": gpu.device,
                     "batches": gpu.batches,
                     "peak_device_bytes": gpu.peak,

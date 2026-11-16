@@ -1,16 +1,19 @@
-// The GPU solver's kernels for wgpu, a translation of `kernels.metal`: the
-// same kernels, buffers and arithmetic (see `src/gpu/schedule.rs` for the
-// order they run in).
+// The GPU solver's kernels: greedy fill, windowed beam refinement and the
+// per-slot bookkeeping between them (see `src/gpu/schedule.rs` for the order
+// they run in).
 //
 // The host prepends a prelude with the workgroup size `GROUP` and the constant
 // tables (`PL`, `NC`, `COLORS`, `WSQ`, `W0..W2`, `LIN`, `M1_*`, `M2_*`),
 // generated from the same Rust constants the CPU solver uses.
 //
-// Differences from the Metal kernels:
+// Every per-pixel expression is the CPU kernel's, with `fma` where the CPU
+// calls `mul_add` and one accumulator lane per pixel of a `vec4`. The driver
+// compiles in fast math, so it may still fuse a multiply and an add or
+// approximate a square root: results agree with the CPU solver to a few parts
+// in 10^7, not bit for bit.
 //
-// - Floating-point evaluation is the driver's: it may fuse a multiply and an
-//   add or approximate a square root, so results agree with the CPU solver to
-//   a few parts in 10^7, not bit for bit.
+// Things WGSL or the drivers impose:
+//
 // - Empty list entries carry `BIG` instead of infinity, which a driver is
 //   allowed to assume never occurs. Real errors are far below it.
 // - A dispatch is two-dimensional, because one dimension is limited to 65,535
@@ -18,6 +21,11 @@
 // - WGSL cannot return a pointer into one of two buffers, so the suffix a
 //   beam candidate carries (`suffixes` at window step 0, `beam` after) is
 //   bound by the host as `sfx_src` for the two hot kernels.
+//
+// Planes are `PL` `vec4`s. Per slot, in order of the buffers: prefixes
+// `[nl + 1][3]` planes, suffixes `[nl + 1][4]` planes (mul, then the three
+// adds), beam suffixes `[2 generations][cand][4]` planes. Per cell: nine
+// planes, the blended sRGB target, the OKLab target and the OKLab feature map.
 
 struct Params {
     n_slots: u32,    // slots in this batch
@@ -133,7 +141,10 @@ fn linearize(v: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(LIN[i.x], LIN[i.y], LIN[i.z], LIN[i.w]);
 }
 
-/// A `pow` seed and one Newton step; see `cube_root` in `kernels.metal`.
+/// The cube root, per lane: a `pow` seed followed by one Newton step whose
+/// residual `y³ − x` has the rounding error of `y²` added back, which brings
+/// the result to within a last-digit difference of the CPU's `cbrt`. Inputs
+/// are LMS values, never negative; `0` maps to `0`.
 fn cube_root(x: vec4<f32>) -> vec4<f32> {
     let y = pow(x, vec4<f32>(1.0 / 3.0));
     let y2 = y * y;
@@ -443,7 +454,14 @@ fn rung1(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// One thread per (slot, candidate, pattern): the exact rung's shortlist, the
 /// `n_exact` best of each (candidate, pattern)'s best dye, each entry placed at
-/// its stable rank (see `shortlist_top` in `kernels.metal`).
+/// its stable rank.
+///
+/// The CPU builds the list by inserting in (candidate, pattern) order and
+/// keeping the earlier entry on equal error, which leaves the first `n_exact`
+/// entries of a stable sort by error. So each entry's place is the number of
+/// entries with a lower error or an equal one inserted earlier, and every
+/// thread computes its own entry's rank independently. Places no real entry
+/// fills get the empty sentinel.
 @compute @workgroup_size(GROUP)
 fn shortlist_top(@builtin(global_invocation_id) gid: vec3<u32>) {
     let id = gid.x + gid.y * P.row;

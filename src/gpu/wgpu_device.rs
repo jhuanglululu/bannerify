@@ -1,10 +1,11 @@
-//! The wgpu layer: Vulkan, DX12 or Metal through one API. Device, compiled
-//! kernels, buffers with a CPU-side copy, and the encoder the schedule records
-//! dispatches into.
+//! The device layer, on wgpu: Vulkan, DX12 or Metal through one API. Device,
+//! compiled kernels, buffers with a CPU-side copy, and the encoder the
+//! schedule records dispatches into. Every `unsafe` block of the GPU backend
+//! is in this file.
 //!
 //! wgpu buffers are not shared with the CPU. A buffer the CPU touches keeps a
 //! copy in host memory: writes go to the copy and are uploaded when the next
-//! encoder is created, and [`DeviceBuffer::fetch`] reads the GPU's contents
+//! encoder is created, and [`Buffer::fetch`] reads the GPU's contents
 //! back into it. Buffers the CPU never touches have no copy.
 //!
 //! On Metal the kernels are translated to MSL here and handed to wgpu as raw
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::GpuError;
-use super::kernel::{Bind, Device, DeviceBuffer, Encode, Kernel, Limits, Plain};
+use super::kernel::{Bind, Kernel, Limits, Plain};
 use super::source;
 use super::state::Params;
 
@@ -141,8 +142,9 @@ impl Buffer {
     }
 }
 
-impl DeviceBuffer<Gpu> for Buffer {
-    fn slice_mut<T: Plain>(&mut self) -> &mut [T] {
+impl Buffer {
+    /// The buffer's contents as `T`s, for the CPU to write.
+    pub(super) fn slice_mut<T: Plain>(&mut self) -> &mut [T] {
         self.ensure_copy();
         self.dirty.set(true);
         assert!(align_of::<T>() <= align_of::<u32>());
@@ -153,15 +155,17 @@ impl DeviceBuffer<Gpu> for Buffer {
         unsafe { std::slice::from_raw_parts_mut(self.copy.as_mut_ptr().cast::<T>(), len) }
     }
 
-    /// Empty until the CPU has written the buffer or fetched it.
-    fn slice<T: Plain>(&self) -> &[T] {
+    /// The buffer's contents as `T`s, as of the last [`Buffer::fetch`] or CPU
+    /// write. Empty until the CPU has written the buffer or fetched it.
+    pub(super) fn slice<T: Plain>(&self) -> &[T] {
         assert!(align_of::<T>() <= align_of::<u32>());
         let len = self.copy.len() * 4 / size_of::<T>();
         // SAFETY: as `slice_mut`, with a shared borrow.
         unsafe { std::slice::from_raw_parts(self.copy.as_ptr().cast::<T>(), len) }
     }
 
-    fn fetch(&mut self, gpu: &Gpu) {
+    /// Read what the kernels wrote back, for [`Buffer::slice`].
+    pub(super) fn fetch(&mut self, gpu: &Gpu) {
         self.ensure_copy();
         let size = self.bytes as u64;
         let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -324,7 +328,8 @@ impl Gpu {
             .collect())
     }
 
-    fn new() -> Result<Self, GpuError> {
+    /// Open the best real GPU and compile every kernel.
+    pub(super) fn new() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY));
         let needed = wgpu::Features::IMMEDIATES;
@@ -431,23 +436,18 @@ impl Gpu {
     }
 }
 
-impl Device for Gpu {
-    type Buffer = Buffer;
-    type Encoder<'a> = Encoder<'a>;
-
-    fn open() -> Result<Self, GpuError> {
-        Gpu::new()
-    }
-
-    fn name(&self) -> &str {
+impl Gpu {
+    /// The device's name, for reports.
+    pub(super) fn name(&self) -> &str {
         &self.name
     }
 
-    fn limits(&self) -> Limits {
+    pub(super) fn limits(&self) -> Limits {
         self.limits
     }
 
-    fn buffer(&self, bytes: usize) -> Result<Buffer, GpuError> {
+    /// A zeroed buffer of at least `bytes` bytes.
+    pub(super) fn buffer(&self, bytes: usize) -> Result<Buffer, GpuError> {
         let bytes = bytes.max(16).next_multiple_of(4);
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let raw = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -471,11 +471,18 @@ impl Device for Gpu {
         })
     }
 
-    fn allocated(&self) -> usize {
+    /// Bytes of device memory the solver's buffers currently take.
+    pub(super) fn allocated(&self) -> usize {
         self.allocated.load(Ordering::Relaxed)
     }
 
-    fn encoder<'a>(
+    /// Start recording dispatches that see `bound` at their binding indices,
+    /// with whatever the CPU wrote to those buffers uploaded first.
+    ///
+    /// With `profile` set every dispatch is submitted and waited for on its
+    /// own and its wall time is added to `profile`'s entry for the kernel, so
+    /// it is for measurement only.
+    pub(super) fn encoder<'a>(
         &'a self,
         bound: &'a [(Bind, &'a Buffer)],
         profile: Option<&'a mut BTreeMap<Kernel, Duration>>,
@@ -541,7 +548,8 @@ struct Pending {
 }
 
 /// Dispatches recorded against one set of bind groups, submitted as a single
-/// compute pass by [`Encode::finish`].
+/// compute pass by [`Encoder::finish`]. They run in recording order, each
+/// seeing every write of the ones before it.
 pub(super) struct Encoder<'a> {
     gpu: &'a Gpu,
     /// Per kernel, with [`SRC`] bound to the suffix chain.
@@ -586,8 +594,9 @@ impl Encoder<'_> {
     }
 }
 
-impl Encode for Encoder<'_> {
-    fn dispatch(&mut self, kernel: Kernel, params: &Params, threads: usize) {
+impl Encoder<'_> {
+    /// Record `kernel` over `threads` threads with `params`.
+    pub(super) fn dispatch(&mut self, kernel: Kernel, params: &Params, threads: usize) {
         if threads == 0 {
             return;
         }
@@ -612,7 +621,8 @@ impl Encode for Encoder<'_> {
         }
     }
 
-    fn finish(mut self) {
+    /// Run everything recorded and wait for it.
+    pub(super) fn finish(mut self) {
         self.flush();
     }
 }

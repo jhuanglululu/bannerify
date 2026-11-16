@@ -14,8 +14,9 @@
 
 use crate::cli::config::RefinementConfig;
 
-use super::kernel::{Encode, Kernel};
+use super::kernel::Kernel;
 use super::state::{PLANE, Params, Shape};
+use super::wgpu_device::Encoder;
 
 /// Plane positions, in `float4` units: the thread count per slot of the
 /// element-wise kernels.
@@ -44,7 +45,7 @@ pub(super) fn base_params(
 
 /// Greedy fill (`greedy::fill`): base dye, then one layer at a time, leaving
 /// the slot's layers, base and `prefixes[0..=nl]` filled in.
-pub(super) fn greedy(enc: &mut impl Encode, p: &Params) {
+pub(super) fn greedy(enc: &mut Encoder<'_>, p: &Params) {
     let n = p.n_slots as usize;
     let nl = p.nl;
     enc.dispatch(Kernel::GreedyBase, p, n);
@@ -63,7 +64,7 @@ pub(super) fn greedy(enc: &mut impl Encode, p: &Params) {
 
 /// Windowed refinement (`refine::refine`) of every slot from its current base
 /// and layers, leaving `prefixes[nl]` the refined composite.
-pub(super) fn refine(enc: &mut impl Encode, p: &Params, cfg: &RefinementConfig) {
+pub(super) fn refine(enc: &mut Encoder<'_>, p: &Params, cfg: &RefinementConfig) {
     let n = p.n_slots as usize;
     let rebuild = Params {
         flag: 1,
@@ -89,7 +90,7 @@ pub(super) fn refine(enc: &mut impl Encode, p: &Params, cfg: &RefinementConfig) 
 }
 
 /// One window (`refine::refine_window`) ending at `start`.
-fn window(enc: &mut impl Encode, p: &Params, start: u32) {
+fn window(enc: &mut Encoder<'_>, p: &Params, start: u32) {
     let n = p.n_slots as usize;
     let window = p.window;
     let mut generation = 0;
@@ -148,6 +149,6 @@ fn window(enc: &mut impl Encode, p: &Params, start: u32) {
 }
 
 /// The ranking and pure-target errors of every slot's `prefixes[nl]`.
-pub(super) fn finish(enc: &mut impl Encode, p: &Params) {
+pub(super) fn finish(enc: &mut Encoder<'_>, p: &Params) {
     enc.dispatch(Kernel::Finish, p, p.n_slots as usize);
 }

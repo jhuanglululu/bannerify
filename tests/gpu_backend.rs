@@ -1,11 +1,10 @@
-//! The GPU backend, on every API this machine can open, against the CPU
-//! solver on the same prepared cells.
+//! The GPU backend against the CPU solver, on the same prepared cells.
 
 use std::collections::HashSet;
 
 use bannerify::cli::config::RefinementConfig;
 use bannerify::geometry::TOP_HW;
-use bannerify::gpu::{GpuApi, GpuBackend};
+use bannerify::gpu::GpuBackend;
 use bannerify::pattern;
 use bannerify::simd::Chunk;
 use bannerify::solver::{Backend, PreparedCell, Rng, SolveCfg, Workspace};
@@ -69,15 +68,13 @@ fn refinement(
 /// up as a total error far from the CPU solver's.
 #[test]
 fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
-    for api in GpuApi::ALL {
-        match GpuBackend::open(api) {
-            Ok(gpu) => check(api, gpu),
-            Err(e) => eprintln!("{} skipped: {e}", api.name()),
+    let mut gpu = match GpuBackend::new() {
+        Ok(gpu) => gpu,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
         }
-    }
-}
-
-fn check(api: GpuApi, mut gpu: GpuBackend) {
+    };
     let patterns = pattern::load(&HashSet::new());
     let cells = cells();
 
@@ -125,10 +122,8 @@ fn check(api: GpuApi, mut gpu: GpuBackend) {
         let rel = (have - want) / want;
         assert!(
             rel.abs() < 0.05,
-            "{} {name}: total error {have} vs the CPU's {want} ({:+.2}%)",
-            api.name(),
+            "{name}: total error {have} vs the CPU's {want} ({:+.2}%)",
             rel * 100.0
         );
-        eprintln!("{} {name}: {:+.4}%", api.name(), rel * 100.0);
     }
 }

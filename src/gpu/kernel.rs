@@ -1,16 +1,8 @@
-//! What every device layer shares: the kernel list, the buffer binding
-//! indices, the device limits a batch is sized by, the marker for
-//! plain-old-data buffer contents, and the interface a device layer
-//! implements ([`Device`], [`DeviceBuffer`], [`Encode`]).
+//! What the solver and the device layer share: the kernel list, the buffer
+//! binding indices, the device limits a batch is sized by and the marker for
+//! plain-old-data buffer contents.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
-
-use super::GpuError;
-use super::state::Params;
-
-/// Every kernel (`kernels.metal`, `kernels.wgsl`), in the order the pipelines
-/// are stored.
+/// Every kernel in `kernels.wgsl`, in the order the pipelines are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Kernel {
     GreedyBase,
@@ -77,7 +69,7 @@ impl Kernel {
     }
 }
 
-/// Buffer binding indices, shared by every kernel (the shader sources declare
+/// Buffer binding indices, shared by every kernel (`kernels.wgsl` declares
 /// the same numbers).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Bind {
@@ -119,62 +111,4 @@ pub(super) struct Limits {
     pub max_buffer_bytes: usize,
     /// Most threads one dispatch may cover.
     pub max_threads: usize,
-}
-
-/// A GPU API the solver can run on: a device, its compiled kernels, and
-/// buffers the CPU can fill and read.
-pub(super) trait Device: Sized {
-    type Buffer: DeviceBuffer<Self>;
-    type Encoder<'a>: Encode
-    where
-        Self: 'a;
-
-    /// Open a device and compile every kernel.
-    fn open() -> Result<Self, GpuError>;
-
-    /// The device's name, for reports.
-    fn name(&self) -> &str;
-
-    fn limits(&self) -> Limits;
-
-    /// A zeroed buffer of at least `bytes` bytes.
-    fn buffer(&self, bytes: usize) -> Result<Self::Buffer, GpuError>;
-
-    /// Bytes of device memory the solver's buffers currently take.
-    fn allocated(&self) -> usize;
-
-    /// Start recording dispatches that see `bound` at their binding indices.
-    /// Whatever the CPU wrote to those buffers is visible to the kernels.
-    ///
-    /// With `profile` set every dispatch is run and waited for on its own and
-    /// its time is added to `profile`'s entry for the kernel, so it is for
-    /// measurement only.
-    fn encoder<'a>(
-        &'a self,
-        bound: &'a [(Bind, &'a Self::Buffer)],
-        profile: Option<&'a mut BTreeMap<Kernel, Duration>>,
-    ) -> Self::Encoder<'a>;
-}
-
-/// A buffer of a [`Device`].
-pub(super) trait DeviceBuffer<D> {
-    /// The buffer's contents as `T`s, for the CPU to write.
-    fn slice_mut<T: Plain>(&mut self) -> &mut [T];
-
-    /// The buffer's contents as `T`s, as of the last [`DeviceBuffer::fetch`]
-    /// or CPU write.
-    fn slice<T: Plain>(&self) -> &[T];
-
-    /// Make what the kernels wrote visible to [`DeviceBuffer::slice`].
-    fn fetch(&mut self, gpu: &D);
-}
-
-/// Dispatches being recorded. They run in recording order, each seeing every
-/// write of the ones before it.
-pub(super) trait Encode {
-    /// Record `kernel` over `threads` threads with `params`.
-    fn dispatch(&mut self, kernel: Kernel, params: &Params, threads: usize);
-
-    /// Run everything recorded and wait for it.
-    fn finish(self);
 }

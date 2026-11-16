@@ -42,29 +42,11 @@ pub enum ListKind {
 pub enum BackendChoice {
     /// The CPU solver, on every worker thread
     Cpu,
-    /// The GPU solver through this platform's default API (Metal on macOS,
-    /// wgpu elsewhere); fails when no GPU can be used
+    /// The GPU solver; fails when no GPU can be used
     Gpu,
     /// The GPU when one can be used, otherwise the CPU
     #[default]
     Auto,
-    /// The GPU solver through Metal directly (macOS only)
-    Metal,
-    /// The GPU solver through wgpu (Vulkan, DX12 or Metal)
-    Wgpu,
-}
-
-impl BackendChoice {
-    /// The GPU API this choice asks for; `None` for the CPU.
-    pub fn gpu_api(self) -> Option<crate::gpu::GpuApi> {
-        use crate::gpu::GpuApi;
-        match self {
-            BackendChoice::Cpu => None,
-            BackendChoice::Gpu | BackendChoice::Auto => Some(GpuApi::DEFAULT),
-            BackendChoice::Metal => Some(GpuApi::Metal),
-            BackendChoice::Wgpu => Some(GpuApi::Wgpu),
-        }
-    }
 }
 
 /// `bannerify <input> <output> [options]`
@@ -149,8 +131,7 @@ pub struct Args {
 
     /// Solver backend [default: auto]: gpu solves on the GPU (NVIDIA, AMD,
     /// Intel or Apple), cpu on the processor, auto uses the GPU when one can
-    /// be used and the CPU otherwise; metal and wgpu pick the GPU API. The GPU
-    /// matches the CPU's quality but not its exact banners
+    /// be used and the CPU otherwise. The GPU matches the CPU's quality but not its exact banners
     #[arg(help_heading = "Backend")]
     #[arg(long, value_enum)]
     pub backend: Option<BackendChoice>,

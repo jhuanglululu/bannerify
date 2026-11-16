@@ -23,18 +23,16 @@
 //!   from the cell's [`crate::solver::Rng`] in the CPU solver's order. Trials
 //!   of a round are one more batch of slots.
 //!
-//! ## Device layers
+//! ## Device
 //!
-//! The solver is written once against [`kernel::Device`] and runs on either
-//! of two APIs ([`GpuApi`]): Metal directly (macOS, `kernels.metal`) or wgpu
-//! (Vulkan, DX12 or Metal, `kernels.wgsl`). The two kernel sources are
-//! translations of each other and must be changed together.
+//! The solver drives the GPU through wgpu ([`wgpu_device`]): Vulkan or DX12
+//! on Linux and Windows, Metal on macOS. The kernels are `kernels.wgsl`.
 //!
 //! ## Agreement with the CPU solver
 //!
 //! The kernels evaluate the CPU kernels' expressions with the same structure
-//! and break ties the same way (insertion order, first minimum), but both
-//! APIs compile them in fast math: the compiler may fuse a multiply and an
+//! and break ties the same way (insertion order, first minimum), but the
+//! driver compiles them in fast math: the compiler may fuse a multiply and an
 //! add, reorder a sum or approximate a square root. Errors therefore agree
 //! with the CPU solver to a few parts in 10^7, not bit for bit, and where two
 //! candidates are that close the GPU may pick the other one. Measured on a
@@ -51,8 +49,6 @@
 //! several batches, so callers may pass any number of cells.
 
 mod kernel;
-#[cfg(target_os = "macos")]
-mod metal;
 mod schedule;
 mod source;
 mod state;
@@ -72,8 +68,9 @@ use crate::pattern::Patterns;
 use crate::solver::{Backend, PreparedCell, Rng, Solution, SolveCfg, Stages, Workspace};
 use crate::solver::{feature, perturb, refine};
 
-use kernel::{Device, DeviceBuffer, Encode, Kernel};
+use kernel::Kernel;
 use state::{Buffers, CELL_BYTES, CELL_PLANES, PLANE, Shape, Slot, Sol};
+use wgpu_device::Gpu;
 
 /// Why the backend could not start (or allocate).
 #[derive(Debug)]
@@ -131,137 +128,15 @@ fn shape(n_pat: usize, refinement: &RefinementConfig, max_layers: usize) -> Shap
     }
 }
 
-/// The API the GPU backend drives the device through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GpuApi {
-    /// Metal directly. macOS only.
-    Metal,
-    /// wgpu: Vulkan or DX12 on Linux and Windows, Metal on macOS.
-    Wgpu,
-}
-
-impl GpuApi {
-    /// Every API, in the order `--backend gpu` tries them on this platform.
-    pub const ALL: [GpuApi; 2] = if cfg!(target_os = "macos") {
-        [GpuApi::Metal, GpuApi::Wgpu]
-    } else {
-        [GpuApi::Wgpu, GpuApi::Metal]
-    };
-
-    /// The API `--backend gpu` uses on this platform.
-    pub const DEFAULT: GpuApi = GpuApi::ALL[0];
-
-    /// The API's name as `--backend` spells it.
-    pub fn name(self) -> &'static str {
-        match self {
-            GpuApi::Metal => "metal",
-            GpuApi::Wgpu => "wgpu",
-        }
-    }
-}
-
-/// The GPU implementation of [`Backend`], on one of the [`GpuApi`]s.
+/// The GPU implementation of [`Backend`].
 ///
 /// [`Backend::solve`] has no error channel, so it panics if a buffer cannot be
 /// allocated or the device fails mid-run; device and compile failures are
-/// reported by [`GpuBackend::open`] instead.
+/// reported by [`GpuBackend::new`] instead.
 pub struct GpuBackend {
-    api: GpuApi,
-    engine: Box<dyn Run>,
-}
-
-/// What [`GpuBackend`] needs from an [`Engine`], whatever its device.
-trait Run: Backend {
-    fn set_progress(&mut self, counter: Arc<AtomicUsize>);
-    fn set_memory_budget(&mut self, bytes: usize);
-    fn device_name(&self) -> &str;
-    fn set_profiling(&mut self, on: bool);
-    fn kernel_times(&self) -> Vec<(&'static str, Duration)>;
-    fn peak_allocated(&self) -> usize;
-    fn batches(&self) -> usize;
-}
-
-impl GpuBackend {
-    /// Open the platform's default API ([`GpuApi::DEFAULT`]).
-    pub fn new() -> Result<Self, GpuError> {
-        Self::open(GpuApi::DEFAULT)
-    }
-
-    /// Open a device through `api` and compile the kernels.
-    pub fn open(api: GpuApi) -> Result<Self, GpuError> {
-        let engine: Box<dyn Run> = match api {
-            #[cfg(target_os = "macos")]
-            GpuApi::Metal => Box::new(Engine::<metal::Gpu>::new()?),
-            #[cfg(not(target_os = "macos"))]
-            GpuApi::Metal => return Err(GpuError::Setup("the Metal API needs macOS".into())),
-            GpuApi::Wgpu => Box::new(Engine::<wgpu_device::Gpu>::new()?),
-        };
-        Ok(Self { api, engine })
-    }
-
-    /// The API this backend runs on.
-    pub fn api(&self) -> GpuApi {
-        self.api
-    }
-
-    /// Count solved cells into `counter` as the work proceeds: a share of a
-    /// chunk's cells after its initial solve and after each perturbation round,
-    /// so the count reaches the chunk's size once the chunk is done.
-    pub fn with_progress(mut self, counter: Arc<AtomicUsize>) -> Self {
-        self.engine.set_progress(counter);
-        self
-    }
-
-    /// Cap the solver's GPU buffers at `bytes`; work beyond it is split into
-    /// batches.
-    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
-        self.engine.set_memory_budget(bytes);
-        self
-    }
-
-    /// The device's name.
-    pub fn device_name(&self) -> &str {
-        self.engine.device_name()
-    }
-
-    /// Measure GPU time per kernel from now on. Every dispatch then waits for
-    /// the previous one, so wall times measured while profiling are not
-    /// representative.
-    pub fn set_profiling(&mut self, on: bool) {
-        self.engine.set_profiling(on);
-    }
-
-    /// GPU time per kernel since profiling was switched on, longest first.
-    pub fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
-        self.engine.kernel_times()
-    }
-
-    /// Largest amount of device memory the backend has had allocated.
-    pub fn peak_allocated(&self) -> usize {
-        self.engine.peak_allocated()
-    }
-
-    /// Batches run so far: one per (refine or greedy fill, set of slots).
-    pub fn batches(&self) -> usize {
-        self.engine.batches()
-    }
-}
-
-impl Backend for GpuBackend {
-    fn solve(&mut self, cells: &[PreparedCell], cfg: &SolveCfg<'_>) -> Vec<Solution> {
-        self.engine.solve(cells, cfg)
-    }
-
-    fn stages(&self) -> Stages {
-        self.engine.stages()
-    }
-}
-
-/// The solver on one device layer.
-struct Engine<D: Device> {
-    gpu: D,
+    gpu: Gpu,
     /// Kept across calls and reused while the shape and capacity fit.
-    buffers: Option<Buffers<D>>,
+    buffers: Option<Buffers>,
     budget: usize,
     stages: Stages,
     /// Per-kernel GPU time, when profiling is on.
@@ -283,24 +158,50 @@ struct Scored {
     pure: f32,
 }
 
-impl<D: Device> Run for Engine<D> {
-    fn set_progress(&mut self, counter: Arc<AtomicUsize>) {
+impl GpuBackend {
+    /// Open the best real GPU on this machine and compile the kernels.
+    pub fn new() -> Result<Self, GpuError> {
+        Ok(Self {
+            gpu: Gpu::new()?,
+            buffers: None,
+            budget: DEFAULT_BUDGET,
+            stages: Stages::default(),
+            profile: None,
+            peak: 0,
+            batches: 0,
+            progress: None,
+        })
+    }
+
+    /// Count solved cells into `counter` as the work proceeds: a share of a
+    /// chunk's cells after its initial solve and after each perturbation round,
+    /// so the count reaches the chunk's size once the chunk is done.
+    pub fn with_progress(mut self, counter: Arc<AtomicUsize>) -> Self {
         self.progress = Some(counter);
+        self
     }
 
-    fn set_memory_budget(&mut self, bytes: usize) {
+    /// Cap the solver's GPU buffers at `bytes`; work beyond it is split into
+    /// batches.
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
         self.budget = bytes;
+        self
     }
 
-    fn device_name(&self) -> &str {
+    /// The device's name.
+    pub fn device_name(&self) -> &str {
         self.gpu.name()
     }
 
-    fn set_profiling(&mut self, on: bool) {
+    /// Measure time per kernel from now on. Every dispatch then waits for the
+    /// previous one, so wall times measured while profiling are not
+    /// representative.
+    pub fn set_profiling(&mut self, on: bool) {
         self.profile = on.then(BTreeMap::new);
     }
 
-    fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
+    /// Time per kernel since profiling was switched on, longest first.
+    pub fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
         let mut out: Vec<_> = self
             .profile
             .iter()
@@ -311,27 +212,14 @@ impl<D: Device> Run for Engine<D> {
         out
     }
 
-    fn peak_allocated(&self) -> usize {
+    /// Largest amount of device memory the backend has had allocated.
+    pub fn peak_allocated(&self) -> usize {
         self.peak
     }
 
-    fn batches(&self) -> usize {
+    /// Batches run so far: one per (refine or greedy fill, set of slots).
+    pub fn batches(&self) -> usize {
         self.batches
-    }
-}
-
-impl<D: Device> Engine<D> {
-    fn new() -> Result<Self, GpuError> {
-        Ok(Self {
-            gpu: D::open()?,
-            buffers: None,
-            budget: DEFAULT_BUDGET,
-            stages: Stages::default(),
-            profile: None,
-            peak: 0,
-            batches: 0,
-            progress: None,
-        })
     }
 
     /// Advance the progress counter to `part` of `parts` equal shares of a
@@ -365,7 +253,7 @@ fn perturbs(cfg: &SolveCfg<'_>, n_layers: usize) -> Option<(usize, usize, usize)
     (n_layers > 0 && top_n > 0 && dup > 0 && rounds > 0).then_some((top_n, dup, rounds))
 }
 
-impl<D: Device> Backend for Engine<D> {
+impl Backend for GpuBackend {
     fn solve(&mut self, cells: &[PreparedCell], cfg: &SolveCfg<'_>) -> Vec<Solution> {
         if cells.is_empty() {
             return Vec::new();
@@ -416,7 +304,7 @@ impl<D: Device> Backend for Engine<D> {
     }
 }
 
-impl<D: Device> Engine<D> {
+impl GpuBackend {
     /// Solve cells that all have `nl` layers and fit the cell buffer.
     fn solve_chunk(
         &mut self,
@@ -681,7 +569,7 @@ impl<D: Device> Engine<D> {
 }
 
 /// Upload the pattern alphas and both `Σ α²` tables.
-fn upload_patterns<D: Device>(buffers: &mut Buffers<D>, patterns: &Patterns) {
+fn upload_patterns(buffers: &mut Buffers, patterns: &Patterns) {
     let alpha = buffers.alpha.slice_mut::<f32>();
     for (dst, src) in alpha.chunks_exact_mut(PLANE).zip(&patterns.top) {
         dst.copy_from_slice(&src[..]);

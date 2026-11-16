@@ -1,10 +1,11 @@
-//! The GPU-side data: the structs shared with `kernels.metal`, the buffer set
+//! The GPU-side data: the structs shared with `kernels.wgsl`, the buffer set
 //! a batch runs in, and how many cells and slots fit a memory budget.
 
 use crate::geometry::TOP_HW;
 
 use super::GpuError;
-use super::kernel::{Bind, Device, Limits, Plain};
+use super::kernel::{Bind, Limits, Plain};
+use super::wgpu_device::{Buffer, Gpu};
 
 /// Floats in one plane.
 pub(super) const PLANE: usize = TOP_HW;
@@ -12,7 +13,7 @@ pub(super) const PLANE: usize = TOP_HW;
 /// Planes of per-cell input: blended sRGB target, OKLab target, OKLab feature.
 pub(super) const CELL_PLANES: usize = 9;
 
-/// Per-dispatch parameters (`Params` in `kernels.metal`).
+/// Per-dispatch parameters (`Params` in `kernels.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct Params {
@@ -27,7 +28,7 @@ pub(super) struct Params {
     pub generation: u32,
     pub start: u32,
     pub flag: u32,
-    /// Threads per dispatch row; set by the wgpu layer, whose dispatches
+    /// Threads per dispatch row; set by the device layer, whose dispatches
     /// are two-dimensional.
     pub row: u32,
     pub lambda: f32,
@@ -39,7 +40,7 @@ pub(super) struct Params {
 // SAFETY: `#[repr(C)]`, sixteen 4-byte fields, no padding, any bit pattern.
 unsafe impl Plain for Params {}
 
-/// Which cell a slot solves (`Slot` in `kernels.metal`).
+/// Which cell a slot solves (`Slot` in `kernels.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct Slot {
@@ -52,7 +53,7 @@ pub(super) struct Slot {
 // SAFETY: `#[repr(C)]`, two `u32`s.
 unsafe impl Plain for Slot {}
 
-/// A slot's scalar state (`Sol` in `kernels.metal`).
+/// A slot's scalar state (`Sol` in `kernels.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct Sol {
@@ -138,30 +139,30 @@ pub(super) const CELL_BYTES: usize = CELL_PLANES * PLANE * 4;
 
 /// Every buffer a batch runs in, sized for `cells` cells and `slots` slots of
 /// `shape`.
-pub(super) struct Buffers<D: Device> {
+pub(super) struct Buffers {
     pub shape: Shape,
     pub cells_cap: usize,
     pub slots_cap: usize,
-    pub cells: D::Buffer,
-    pub alpha: D::Buffer,
-    pub alpha2: D::Buffer,
-    pub slots: D::Buffer,
-    pub sols: D::Buffer,
-    pub layers: D::Buffer,
-    pub prefixes: D::Buffer,
-    pub suffixes: D::Buffer,
-    pub beam: D::Buffer,
-    pub chains: D::Buffer,
-    pub best: D::Buffer,
-    pub shortlist: D::Buffer,
-    pub rung1: D::Buffer,
-    pub rung2: D::Buffer,
-    pub reopt: D::Buffer,
+    pub cells: Buffer,
+    pub alpha: Buffer,
+    pub alpha2: Buffer,
+    pub slots: Buffer,
+    pub sols: Buffer,
+    pub layers: Buffer,
+    pub prefixes: Buffer,
+    pub suffixes: Buffer,
+    pub beam: Buffer,
+    pub chains: Buffer,
+    pub best: Buffer,
+    pub shortlist: Buffer,
+    pub rung1: Buffer,
+    pub rung2: Buffer,
+    pub reopt: Buffer,
 }
 
-impl<D: Device> Buffers<D> {
+impl Buffers {
     pub(super) fn new(
-        gpu: &D,
+        gpu: &Gpu,
         shape: Shape,
         cells_cap: usize,
         slots_cap: usize,
@@ -192,7 +193,7 @@ impl<D: Device> Buffers<D> {
     }
 
     /// The binding table every encoder of this buffer set uses.
-    pub(super) fn bindings(&self) -> [(Bind, &D::Buffer); 15] {
+    pub(super) fn bindings(&self) -> [(Bind, &Buffer); 15] {
         [
             (Bind::Cells, &self.cells),
             (Bind::Alpha, &self.alpha),

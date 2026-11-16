@@ -5,7 +5,7 @@
 //! cargo run --release --example gpu_check -- [--rows N] [-p TOP_N DUP ROUNDS]
 //!     [-R passes] [-k window] [-x exact] [-F weight] [-C candidates]
 //!     [-t threshold] [--seed S] [--budget MIB] [--profile] [--no-cpu]
-//!     [--diff N] [--only CELL] [--api metal|wgpu] [--image PATH]
+//!     [--diff N] [--only CELL] [--image PATH]
 //! ```
 //!
 //! The cells are built from the image (`docs/example.png` unless `--image`
@@ -25,7 +25,7 @@ mod check {
 
     use bannerify::cli::config::RefinementConfig;
     use bannerify::geometry::{BLOCK_SIDE, NTOP_HW, TOP_HW};
-    use bannerify::gpu::{GpuApi, GpuBackend};
+    use bannerify::gpu::GpuBackend;
     use bannerify::layout::{Dimension, Layout, ResizingMethod};
     use bannerify::pattern;
     use bannerify::resample::{Plan, PlanarU8};
@@ -47,7 +47,6 @@ mod check {
         cpu: bool,
         diff: usize,
         only: Option<usize>,
-        api: GpuApi,
         image: String,
     }
 
@@ -69,7 +68,6 @@ mod check {
             cpu: true,
             diff: 0,
             only: None,
-            api: GpuApi::DEFAULT,
             image: concat!(env!("CARGO_MANIFEST_DIR"), "/docs/example.png").into(),
         };
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -101,13 +99,6 @@ mod check {
                 }
                 "--only" => o.only = Some(num(i + 1).parse().expect("--only CELL")),
                 "--diff" => o.diff = num(i + 1).parse().expect("--diff N"),
-                "--api" => {
-                    o.api = match num(i + 1) {
-                        "metal" => GpuApi::Metal,
-                        "wgpu" => GpuApi::Wgpu,
-                        other => panic!("--api metal|wgpu, got {other}"),
-                    }
-                }
                 "--image" => o.image = num(i + 1).to_owned(),
                 "--profile" => {
                     o.profile = true;
@@ -272,7 +263,7 @@ mod check {
         });
 
         let t = Instant::now();
-        let mut backend = GpuBackend::open(o.api).unwrap_or_else(|e| panic!("{e}"));
+        let mut backend = GpuBackend::new().unwrap_or_else(|e| panic!("{e}"));
         if let Some(b) = o.budget {
             backend = backend.with_memory_budget(b);
         }

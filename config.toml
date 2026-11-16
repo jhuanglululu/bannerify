@@ -12,11 +12,10 @@
 
 # * Backend Options *
 
-# solver backend: "auto" (default), "gpu", "cpu", "metal" or "wgpu"
+# solver backend: "auto" (default), "gpu" or "cpu"
 # gpu solves on the GPU and fails with exit code 6 when none can be used; cpu
 # solves on the processor; auto uses the GPU when one can be used and the CPU
-# otherwise; metal and wgpu pick the GPU API (gpu means metal on macOS, wgpu
-# elsewhere)
+# otherwise
 # backend = "auto"
 
 # GPU memory budget for the solver's buffers, in MiB (default 2048)
