@@ -386,22 +386,23 @@ fn gpu_unavailable(reason: impl std::fmt::Display) -> Diagnostic {
     .hint("use --backend cpu, or --backend auto to fall back to the CPU")
 }
 
-/// Open the GPU backend if `--backend` asks for it: `None` means the CPU
-/// backend runs. Under `gpu` a failure is fatal (exit code 6); under `auto`
-/// it is a warning and the CPU backend runs instead.
-fn open_gpu(config: &Config) -> Option<GpuBackend> {
+/// Open the GPU backend if `--backend` asks for it. `Err` means the CPU
+/// backend runs, and carries the reason when `auto` fell back to it (`None`
+/// under `--backend cpu`). Under `gpu` a failure is fatal (exit code 6);
+/// under `auto` it is a warning.
+fn open_gpu(config: &Config) -> Result<GpuBackend, Option<String>> {
     if config.backend == BackendChoice::Cpu {
-        return None;
+        return Err(None);
     }
     match GpuBackend::new() {
-        Ok(gpu) => Some(gpu.with_memory_budget(config.gpu_memory << 20)),
+        Ok(gpu) => Ok(gpu.with_memory_budget(config.gpu_memory << 20)),
         Err(e) if config.backend == BackendChoice::Gpu => fatal(gpu_unavailable(e)),
         Err(e) => {
             logger::warn(Diagnostic::new(
                 Kind::GpuUnavailable,
                 format!("the GPU backend is unavailable ({e}); solving on the CPU"),
             ));
-            None
+            Err(Some(e.to_string()))
         }
     }
 }
@@ -592,10 +593,14 @@ fn run(config: &Config) {
     let t = Instant::now();
     let gpu = open_gpu(config);
     let t_backend = t.elapsed();
+    // The fallback reason is repeated here, next to the backend's name, so
+    // the line answers "why the CPU?" without the warning above it.
     match &gpu {
-        Some(gpu) => info!("backend: gpu ({})", gpu.device_name()),
-        None => info!("backend: cpu"),
+        Ok(gpu) => info!("backend: gpu ({})", gpu.device_name()),
+        Err(Some(reason)) => info!("backend: cpu (GPU unavailable: {reason})"),
+        Err(None) => info!("backend: cpu"),
     }
+    let gpu = gpu.ok();
 
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
