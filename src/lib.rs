@@ -9,7 +9,6 @@ pub mod cli;
 pub mod color;
 pub mod export;
 pub mod geometry;
-#[cfg(target_os = "macos")]
 pub mod gpu;
 pub mod layout;
 pub mod logger;

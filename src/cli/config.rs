@@ -26,7 +26,7 @@ const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 
-/// Default GPU memory budget, in MiB: the Metal backend's own default.
+/// Default GPU memory budget, in MiB: the GPU backend's own default.
 const DEFAULT_GPU_MEMORY: usize = 2048;
 
 /// The validated, merged configuration the pipeline runs on.
@@ -606,9 +606,8 @@ impl Checker {
         }
     }
 
-    /// The GPU memory budget must be at least 1 MiB, and, where the GPU
-    /// backend can run at all, large enough for it to solve one cell with
-    /// these settings. The size check uses the largest layer count the range
+    /// The GPU memory budget must be at least 1 MiB, and large enough for the
+    /// GPU backend to solve one cell with these settings. The size check uses the largest layer count the range
     /// allows, since the per-cell budgets are not known yet. It is skipped
     /// under `--backend cpu`, which never uses the budget.
     fn gpu_memory(
@@ -626,7 +625,6 @@ impl Checker {
             self.invalid(origin, mib, "at least 1");
             return;
         }
-        #[cfg(target_os = "macos")]
         if backend != BackendChoice::Cpu
             && let Some((_, max_layers)) = n_layers
         {
@@ -643,8 +641,6 @@ impl Checker {
                 );
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (backend, n_patterns, refinement, n_layers);
     }
 
     /// An excluded id that names nothing is a user mistake, not a silent

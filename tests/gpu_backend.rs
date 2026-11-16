@@ -1,12 +1,11 @@
-//! The Metal backend against the CPU solver, on the same prepared cells.
-
-#![cfg(target_os = "macos")]
+//! The GPU backend, on every API this machine can open, against the CPU
+//! solver on the same prepared cells.
 
 use std::collections::HashSet;
 
 use bannerify::cli::config::RefinementConfig;
 use bannerify::geometry::TOP_HW;
-use bannerify::gpu::MetalBackend;
+use bannerify::gpu::{GpuApi, GpuBackend};
 use bannerify::pattern;
 use bannerify::simd::Chunk;
 use bannerify::solver::{Backend, PreparedCell, Rng, SolveCfg, Workspace};
@@ -64,15 +63,21 @@ fn refinement(
 /// Every configuration axis the backend branches on: exact rung on and off,
 /// feature weight zero and not, window length, beam width, threshold off,
 /// refinement off, and perturbation rounds.
+///
+/// The GPU kernels run in fast math, so a near-tie may resolve to another
+/// banner than the CPU's; what must hold is the quality. A wrong kernel shows
+/// up as a total error far from the CPU solver's.
 #[test]
-fn the_gpu_backend_reproduces_the_cpu_solver() {
-    let mut gpu = match MetalBackend::new() {
-        Ok(gpu) => gpu,
-        Err(e) => {
-            eprintln!("skipped: {e}");
-            return;
+fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
+    for api in GpuApi::ALL {
+        match GpuBackend::open(api) {
+            Ok(gpu) => check(api, gpu),
+            Err(e) => eprintln!("{} skipped: {e}", api.name()),
         }
-    };
+    }
+}
+
+fn check(api: GpuApi, mut gpu: GpuBackend) {
     let patterns = pattern::load(&HashSet::new());
     let cells = cells();
 
@@ -113,19 +118,17 @@ fn the_gpu_backend_reproduces_the_cpu_solver() {
             .collect();
         let got = gpu.solve(&cells, &cfg);
 
-        for (i, (want, got)) in expected.iter().zip(&got).enumerate() {
-            assert_eq!(
-                (want.base, &want.layers),
-                (got.base, &got.layers),
-                "{name}: cell {i}"
-            );
-            let rel = ((got.error - want.error) / want.error).abs();
-            assert!(
-                rel < 1e-5,
-                "{name}: cell {i} error {} vs {}",
-                got.error,
-                want.error
-            );
-        }
+        assert_eq!(got.len(), expected.len());
+        let total =
+            |s: &[bannerify::solver::Solution]| s.iter().map(|s| s.error as f64).sum::<f64>();
+        let (want, have) = (total(&expected), total(&got));
+        let rel = (have - want) / want;
+        assert!(
+            rel.abs() < 0.05,
+            "{} {name}: total error {have} vs the CPU's {want} ({:+.2}%)",
+            api.name(),
+            rel * 100.0
+        );
+        eprintln!("{} {name}: {:+.4}%", api.name(), rel * 100.0);
     }
 }

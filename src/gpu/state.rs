@@ -4,7 +4,7 @@
 use crate::geometry::TOP_HW;
 
 use super::GpuError;
-use super::metal::{Bind, Buffer, Gpu, Plain};
+use super::kernel::{Bind, Device, Limits, Plain};
 
 /// Floats in one plane.
 pub(super) const PLANE: usize = TOP_HW;
@@ -27,7 +27,9 @@ pub(super) struct Params {
     pub generation: u32,
     pub start: u32,
     pub flag: u32,
-    pub pad0: u32,
+    /// Threads per dispatch row; set by the wgpu layer, whose dispatches
+    /// are two-dimensional.
+    pub row: u32,
     pub lambda: f32,
     pub threshold: f32,
     pub pad1: f32,
@@ -65,7 +67,7 @@ pub(super) struct Sol {
 // SAFETY: `#[repr(C)]`, eight 4-byte fields, no padding, any bit pattern.
 unsafe impl Plain for Sol {}
 
-/// What a refine run is shaped by; fixed for a whole [`super::MetalBackend::solve`].
+/// What a refine run is shaped by; fixed for a whole solve call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Shape {
     /// Patterns.
@@ -109,6 +111,19 @@ impl Shape {
         floats * 4
     }
 
+    /// Bytes one slot takes in the largest per-slot buffer.
+    fn largest_buffer_bytes(&self) -> usize {
+        let planes = ((self.max_layers + 1) * 4).max(2 * self.cand * 4);
+        (planes * PLANE).max(self.rung1_floats()) * 4
+    }
+
+    /// Threads one slot takes in the largest dispatch.
+    fn largest_dispatch(&self) -> usize {
+        (self.cand * self.n_pat.max(PLANE / 4))
+            .max(self.n_exact)
+            .max(16)
+    }
+
     /// Rung-1 output per slot: `(error, dye)` per (candidate, pattern), or all
     /// 16 dye errors with the exact rung off. The greedy fill's per-pattern
     /// output fits in either.
@@ -123,30 +138,30 @@ pub(super) const CELL_BYTES: usize = CELL_PLANES * PLANE * 4;
 
 /// Every buffer a batch runs in, sized for `cells` cells and `slots` slots of
 /// `shape`.
-pub(super) struct Buffers {
+pub(super) struct Buffers<D: Device> {
     pub shape: Shape,
     pub cells_cap: usize,
     pub slots_cap: usize,
-    pub cells: Buffer,
-    pub alpha: Buffer,
-    pub alpha2: Buffer,
-    pub slots: Buffer,
-    pub sols: Buffer,
-    pub layers: Buffer,
-    pub prefixes: Buffer,
-    pub suffixes: Buffer,
-    pub beam: Buffer,
-    pub chains: Buffer,
-    pub best: Buffer,
-    pub shortlist: Buffer,
-    pub rung1: Buffer,
-    pub rung2: Buffer,
-    pub reopt: Buffer,
+    pub cells: D::Buffer,
+    pub alpha: D::Buffer,
+    pub alpha2: D::Buffer,
+    pub slots: D::Buffer,
+    pub sols: D::Buffer,
+    pub layers: D::Buffer,
+    pub prefixes: D::Buffer,
+    pub suffixes: D::Buffer,
+    pub beam: D::Buffer,
+    pub chains: D::Buffer,
+    pub best: D::Buffer,
+    pub shortlist: D::Buffer,
+    pub rung1: D::Buffer,
+    pub rung2: D::Buffer,
+    pub reopt: D::Buffer,
 }
 
-impl Buffers {
+impl<D: Device> Buffers<D> {
     pub(super) fn new(
-        gpu: &Gpu,
+        gpu: &D,
         shape: Shape,
         cells_cap: usize,
         slots_cap: usize,
@@ -177,7 +192,7 @@ impl Buffers {
     }
 
     /// The binding table every encoder of this buffer set uses.
-    pub(super) fn bindings(&self) -> [(Bind, &Buffer); 15] {
+    pub(super) fn bindings(&self) -> [(Bind, &D::Buffer); 15] {
         [
             (Bind::Cells, &self.cells),
             (Bind::Alpha, &self.alpha),
@@ -204,11 +219,14 @@ impl Buffers {
 ///
 /// Cell inputs take at most a quarter of the budget, and never so much that
 /// one slot no longer fits; slot state gets the rest. Both are capped at what
-/// the work can use, so a small call allocates little. Succeeds whenever
-/// `budget` is at least [`super::min_memory_budget`] for this shape.
+/// the work can use, so a small call allocates little. Neither exceeds what
+/// the device allows in one buffer or one dispatch (`limits`). Succeeds
+/// whenever `budget` is at least [`super::min_memory_budget`] for this shape
+/// and the device can hold one cell and one slot.
 pub(super) fn capacity(
     shape: &Shape,
     budget: usize,
+    limits: &Limits,
     cells: usize,
     slots_per_cell: usize,
 ) -> Result<(usize, usize), GpuError> {
@@ -216,9 +234,13 @@ pub(super) fn capacity(
     let cells_cap = cells
         .min(budget / 4 / CELL_BYTES)
         .min(budget.saturating_sub(slot_bytes) / CELL_BYTES)
+        .min(limits.max_buffer_bytes / CELL_BYTES)
         .max(1);
     let rest = budget.saturating_sub(cells_cap * CELL_BYTES);
-    let slots_cap = (rest / slot_bytes).min(cells_cap * slots_per_cell);
+    let slots_cap = (rest / slot_bytes)
+        .min(cells_cap * slots_per_cell)
+        .min(limits.max_buffer_bytes / shape.largest_buffer_bytes())
+        .min(limits.max_threads / shape.largest_dispatch());
     if slots_cap == 0 {
         return Err(GpuError::OutOfMemory(slot_bytes + CELL_BYTES));
     }

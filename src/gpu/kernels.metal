@@ -5,23 +5,16 @@
 // `COLORS`, `WSQ`, `W0..W2`, `LIN`, `M1_*`, `M2_*`), generated from the same
 // Rust constants the CPU solver uses.
 //
-// Every per-pixel expression is the CPU kernel's, operation for operation:
-// `fma` exactly where the CPU calls `mul_add`, plain operations everywhere
-// else, and floating-point contraction is switched off so the compiler cannot
-// fuse anything the CPU does not. Pixel sums keep four accumulators, one per
-// NEON lane, over the same pixel order, and reduce them as `vaddvq_f32` does,
-// `(x + y) + (z + w)`. The closed-form rungs therefore reproduce the CPU's
-// numbers bit for bit, and the exact rung does too wherever `cube_root`
-// rounds as libm's `cbrtf` (see there).
+// Every per-pixel expression is the CPU kernel's, with `fma` where the CPU
+// calls `mul_add` and four accumulators per pixel sum. The source is compiled
+// in fast math, so the compiler may still fuse, reorder or approximate:
+// results agree with the CPU solver to a few parts in 10^7, not bit for bit.
 //
 // Buffer bindings are the same for every kernel (`Bind` in `src/gpu/metal.rs`):
 // a kernel declares only the ones it reads or writes.
 
 #include <metal_stdlib>
 using namespace metal;
-
-#pragma METAL fp math_mode(safe)
-#pragma METAL fp contract(off)
 
 /// Per-dispatch parameters. Field meaning per kernel is documented at the
 /// kernel; the layout matches `Params` in `src/gpu/state.rs`.
@@ -37,7 +30,7 @@ struct Params {
     uint generation; // beam generation the step reads; it writes `generation ^ 1`
     uint start;     // the window's start layer
     uint flag;      // kernel-specific switch
-    uint pad0;
+    uint row;       // used by the WGSL kernels only
     float lambda;   // feature weight
     float threshold;// `error_threshold`
     float pad1;

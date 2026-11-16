@@ -1,28 +1,22 @@
-//! Verification harness for the Metal backend: solves the same prepared cells
+//! Verification harness for the GPU backend: solves the same prepared cells
 //! on the CPU solver and on the GPU and compares the results.
 //!
 //! ```text
 //! cargo run --release --example gpu_check -- [--rows N] [-p TOP_N DUP ROUNDS]
 //!     [-R passes] [-k window] [-x exact] [-F weight] [-C candidates]
 //!     [-t threshold] [--seed S] [--budget MIB] [--profile] [--no-cpu]
-//!     [--diff N] [--only CELL]
+//!     [--diff N] [--only CELL] [--api metal|wgpu] [--image PATH]
 //! ```
 //!
-//! The cells are built from `docs/example.png` the way the CLI builds them:
+//! The cells are built from the image (`docs/example.png` unless `--image`
+//! names another) the way the CLI builds them:
 //! layout, resample plan, one band per block column, `BandView::gather`, and
 //! the variance-based layer grid. Cell `i` (row-major) gets `Rng::new(seed, i)`.
 
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("gpu_check needs macOS (Metal)");
-}
-
-#[cfg(target_os = "macos")]
 fn main() {
     check::main();
 }
 
-#[cfg(target_os = "macos")]
 mod check {
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
@@ -31,7 +25,7 @@ mod check {
 
     use bannerify::cli::config::RefinementConfig;
     use bannerify::geometry::{BLOCK_SIDE, NTOP_HW, TOP_HW};
-    use bannerify::gpu::MetalBackend;
+    use bannerify::gpu::{GpuApi, GpuBackend};
     use bannerify::layout::{Dimension, Layout, ResizingMethod};
     use bannerify::pattern;
     use bannerify::resample::{Plan, PlanarU8};
@@ -53,6 +47,8 @@ mod check {
         cpu: bool,
         diff: usize,
         only: Option<usize>,
+        api: GpuApi,
+        image: String,
     }
 
     fn parse() -> Opts {
@@ -73,6 +69,8 @@ mod check {
             cpu: true,
             diff: 0,
             only: None,
+            api: GpuApi::DEFAULT,
+            image: concat!(env!("CARGO_MANIFEST_DIR"), "/docs/example.png").into(),
         };
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -103,6 +101,14 @@ mod check {
                 }
                 "--only" => o.only = Some(num(i + 1).parse().expect("--only CELL")),
                 "--diff" => o.diff = num(i + 1).parse().expect("--diff N"),
+                "--api" => {
+                    o.api = match num(i + 1) {
+                        "metal" => GpuApi::Metal,
+                        "wgpu" => GpuApi::Wgpu,
+                        other => panic!("--api metal|wgpu, got {other}"),
+                    }
+                }
+                "--image" => o.image = num(i + 1).to_owned(),
                 "--profile" => {
                     o.profile = true;
                     i -= 1;
@@ -118,10 +124,9 @@ mod check {
         o
     }
 
-    /// Every banner cell of `docs/example.png` at `rows` rows, row-major.
-    fn cells(rows: usize, seed: u64) -> Vec<PreparedCell> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/example.png");
-        let rgb = image::open(path).expect("docs/example.png").to_rgb8();
+    /// Every banner cell of the image at `path` at `rows` rows, row-major.
+    fn cells(path: &str, rows: usize, seed: u64) -> Vec<PreparedCell> {
+        let rgb = image::open(path).expect("readable image").to_rgb8();
         let (w, h) = (rgb.width() as usize, rgb.height() as usize);
         let source = PlanarU8::from_interleaved(rgb.as_raw(), w, h, 3);
         let layout = Layout::compute(
@@ -235,7 +240,7 @@ mod check {
         };
 
         let t = Instant::now();
-        let mut cells = cells(o.rows, o.seed);
+        let mut cells = cells(&o.image, o.rows, o.seed);
         if let Some(i) = o.only {
             cells = vec![cells.swap_remove(i)];
         }
@@ -267,7 +272,7 @@ mod check {
         });
 
         let t = Instant::now();
-        let mut backend = MetalBackend::new().unwrap_or_else(|e| panic!("{e}"));
+        let mut backend = GpuBackend::open(o.api).unwrap_or_else(|e| panic!("{e}"));
         if let Some(b) = o.budget {
             backend = backend.with_memory_budget(b);
         }

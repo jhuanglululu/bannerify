@@ -1,5 +1,5 @@
-//! The MSL source the backend compiles: a generated prelude of constant tables
-//! followed by `kernels.metal`.
+//! The shader sources the device layers compile: a generated prelude of
+//! constant tables followed by `kernels.metal` (MSL) or `kernels.wgsl` (WGSL).
 //!
 //! The tables are printed from the CPU solver's own constants (the dye table,
 //! its weighted squares, the luma weights, and [`crate::oklab`]'s
@@ -15,6 +15,7 @@ use crate::geometry::TOP_HW;
 use crate::oklab::{LINEARIZE, M1, M2};
 
 /// An `f32` as an MSL literal that parses back to the same value.
+#[cfg(target_os = "macos")]
 fn lit(v: f32) -> String {
     let s = format!("{v:?}");
     if s.contains(['.', 'e']) {
@@ -24,11 +25,13 @@ fn lit(v: f32) -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn list(values: impl IntoIterator<Item = f32>) -> String {
     values.into_iter().map(lit).collect::<Vec<_>>().join(", ")
 }
 
 /// The full MSL source: prelude, then the kernels.
+#[cfg(target_os = "macos")]
 pub(super) fn msl() -> String {
     let mut out = String::new();
     // `writeln!` into a `String` cannot fail.
@@ -59,5 +62,61 @@ pub(super) fn msl() -> String {
         }
     }
     out.push_str(include_str!("kernels.metal"));
+    out
+}
+
+/// An `f32` as a WGSL literal that parses back to the same value.
+fn wgsl_lit(v: f32) -> String {
+    let s = format!("{v:?}");
+    if s.contains(['.', 'e']) {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+fn wgsl_list(values: impl IntoIterator<Item = f32>) -> String {
+    values
+        .into_iter()
+        .map(wgsl_lit)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The full WGSL source for workgroups of `group` threads: prelude, then the
+/// kernels.
+pub(super) fn wgsl(group: usize) -> String {
+    let mut out = String::new();
+    // `writeln!` into a `String` cannot fail.
+    let _ = writeln!(out, "const GROUP: u32 = {group}u;");
+    let _ = writeln!(out, "const PL: u32 = {}u;", TOP_HW / 4);
+    let _ = writeln!(out, "const NC: u32 = {NUM_COLORS}u;");
+    let colors = COLORS_F32
+        .iter()
+        .map(|c| format!("vec3<f32>({})", wgsl_list(c.iter().copied())))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "const COLORS = array<vec3<f32>, 16>({colors});");
+    let _ = writeln!(
+        out,
+        "const WSQ = array<f32, 16>({});",
+        wgsl_list(COLORS_WSQ_SUM)
+    );
+    for (i, w) in W_PERCEPTUAL.iter().enumerate() {
+        let _ = writeln!(out, "const W{i}: f32 = {};", wgsl_lit(*w));
+    }
+    let _ = writeln!(
+        out,
+        "const LIN = array<f32, 256>({});",
+        wgsl_list(LINEARIZE)
+    );
+    for (name, m) in [("M1", M1), ("M2", M2)] {
+        for (r, row) in m.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                let _ = writeln!(out, "const {name}_{r}{c}: f32 = {};", wgsl_lit(*v as f32));
+            }
+        }
+    }
+    out.push_str(include_str!("kernels.wgsl"));
     out
 }

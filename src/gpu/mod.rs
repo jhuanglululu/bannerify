@@ -1,5 +1,5 @@
-//! The Metal solver backend: greedy fill, windowed refinement and
-//! perturbation rounds on the GPU, behind [`crate::solver::Backend`].
+//! The GPU solver backend: greedy fill, windowed refinement and perturbation
+//! rounds on the GPU, behind [`crate::solver::Backend`].
 //!
 //! ## Slots and lockstep
 //!
@@ -16,35 +16,47 @@
 //! - CPU, per cell, in parallel: the OKLab target and, with a non-zero feature
 //!   weight, the feature map and the blended target, with the CPU solver's own
 //!   code ([`crate::solver::refine::convert_target`],
-//!   [`crate::solver::feature::build`]), written straight into a shared buffer.
+//!   [`crate::solver::feature::build`]), written into the cell buffer.
 //! - GPU: greedy fill, every refinement pass, the final error readout.
 //! - CPU, between perturbation rounds: each cell's pool, kept exactly as
 //!   [`crate::solver::perturb`] keeps it, and the next round's trials, drawn
 //!   from the cell's [`crate::solver::Rng`] in the CPU solver's order. Trials
 //!   of a round are one more batch of slots.
 //!
+//! ## Device layers
+//!
+//! The solver is written once against [`kernel::Device`] and runs on either
+//! of two APIs ([`GpuApi`]): Metal directly (macOS, `kernels.metal`) or wgpu
+//! (Vulkan, DX12 or Metal, `kernels.wgsl`). The two kernel sources are
+//! translations of each other and must be changed together.
+//!
 //! ## Agreement with the CPU solver
 //!
-//! The kernels evaluate the CPU kernels' expressions operation for operation,
-//! with the same per-lane summation order, and break ties the same way
-//! (insertion order, first minimum). The one function without a matching GPU
-//! instruction is the OKLab cube root; the kernels compute it as a refined
-//! `pow` that rounds like libm's `cbrtf` on every value the reference runs
-//! produce, but that is measured, not guaranteed, so a last-bit difference can
-//! still resolve a near-tie the other way. Results are deterministic run to
-//! run: no kernel uses atomics or depends on scheduling order.
+//! The kernels evaluate the CPU kernels' expressions with the same structure
+//! and break ties the same way (insertion order, first minimum), but both
+//! APIs compile them in fast math: the compiler may fuse a multiply and an
+//! add, reorder a sum or approximate a square root. Errors therefore agree
+//! with the CPU solver to a few parts in 10^7, not bit for bit, and where two
+//! candidates are that close the GPU may pick the other one. Measured on a
+//! 50-row wall, 12-24% of banners differ from the CPU's while the mean error
+//! differs by under 0.1%. Results are deterministic run to run on one device:
+//! no kernel uses atomics or depends on scheduling order.
 //!
 //! ## Memory
 //!
 //! Slot state (prefix chain, suffix chain, two beam generations) is about
 //! 90 planes of 800 `f32`. The backend sizes its buffers from a memory budget
-//! ([`MetalBackend::with_memory_budget`]) and splits any call that exceeds it
-//! into several batches, so callers may pass any number of cells.
+//! ([`GpuBackend::with_memory_budget`]) and from what the device allows in
+//! one buffer and one dispatch, and splits any call that exceeds them into
+//! several batches, so callers may pass any number of cells.
 
+mod kernel;
+#[cfg(target_os = "macos")]
 mod metal;
 mod schedule;
 mod source;
 mod state;
+mod wgpu_device;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -60,13 +72,13 @@ use crate::pattern::Patterns;
 use crate::solver::{Backend, PreparedCell, Rng, Solution, SolveCfg, Stages, Workspace};
 use crate::solver::{feature, perturb, refine};
 
-use metal::{Gpu, Kernel};
+use kernel::{Device, DeviceBuffer, Encode, Kernel};
 use state::{Buffers, CELL_BYTES, CELL_PLANES, PLANE, Shape, Slot, Sol};
 
 /// Why the backend could not start (or allocate).
 #[derive(Debug)]
 pub enum GpuError {
-    /// No Metal device on this machine.
+    /// No GPU this backend can use on this machine.
     NoDevice,
     /// The kernels failed to compile, or a pipeline could not be built.
     Compile(String),
@@ -80,7 +92,7 @@ pub enum GpuError {
 impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GpuError::NoDevice => write!(f, "no Metal device found"),
+            GpuError::NoDevice => write!(f, "no usable GPU found"),
             GpuError::Compile(e) => write!(f, "GPU kernels failed to compile: {e}"),
             GpuError::Setup(e) => write!(f, "GPU setup failed: {e}"),
             GpuError::OutOfMemory(n) => write!(f, "could not allocate {n} bytes of GPU memory"),
@@ -90,12 +102,11 @@ impl fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
-/// Default memory budget for solver buffers: 2 GiB, a fraction of the unified
-/// memory of any Apple Silicon machine, and enough for a 40-row wall's initial
-/// solves in one batch.
+/// Default memory budget for solver buffers: 2 GiB, enough for a 40-row
+/// wall's initial solves in one batch.
 const DEFAULT_BUDGET: usize = 2 << 30;
 
-/// The smallest memory budget ([`MetalBackend::with_memory_budget`]) the
+/// The smallest memory budget ([`GpuBackend::with_memory_budget`]) the
 /// backend can solve cells of up to `max_layers` layers in, with `n_patterns`
 /// patterns and these refinement settings: the input of one cell plus the
 /// state of one slot. Any budget at least this large works; a larger one only
@@ -120,15 +131,137 @@ fn shape(n_pat: usize, refinement: &RefinementConfig, max_layers: usize) -> Shap
     }
 }
 
-/// The Metal implementation of [`Backend`].
+/// The API the GPU backend drives the device through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuApi {
+    /// Metal directly. macOS only.
+    Metal,
+    /// wgpu: Vulkan or DX12 on Linux and Windows, Metal on macOS.
+    Wgpu,
+}
+
+impl GpuApi {
+    /// Every API, in the order `--backend gpu` tries them on this platform.
+    pub const ALL: [GpuApi; 2] = if cfg!(target_os = "macos") {
+        [GpuApi::Metal, GpuApi::Wgpu]
+    } else {
+        [GpuApi::Wgpu, GpuApi::Metal]
+    };
+
+    /// The API `--backend gpu` uses on this platform.
+    pub const DEFAULT: GpuApi = GpuApi::ALL[0];
+
+    /// The API's name as `--backend` spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            GpuApi::Metal => "metal",
+            GpuApi::Wgpu => "wgpu",
+        }
+    }
+}
+
+/// The GPU implementation of [`Backend`], on one of the [`GpuApi`]s.
 ///
 /// [`Backend::solve`] has no error channel, so it panics if a buffer cannot be
-/// allocated or a command buffer fails on the GPU; device and compile failures
-/// are reported by [`MetalBackend::new`] instead.
-pub struct MetalBackend {
-    gpu: Gpu,
+/// allocated or the device fails mid-run; device and compile failures are
+/// reported by [`GpuBackend::open`] instead.
+pub struct GpuBackend {
+    api: GpuApi,
+    engine: Box<dyn Run>,
+}
+
+/// What [`GpuBackend`] needs from an [`Engine`], whatever its device.
+trait Run: Backend {
+    fn set_progress(&mut self, counter: Arc<AtomicUsize>);
+    fn set_memory_budget(&mut self, bytes: usize);
+    fn device_name(&self) -> &str;
+    fn set_profiling(&mut self, on: bool);
+    fn kernel_times(&self) -> Vec<(&'static str, Duration)>;
+    fn peak_allocated(&self) -> usize;
+    fn batches(&self) -> usize;
+}
+
+impl GpuBackend {
+    /// Open the platform's default API ([`GpuApi::DEFAULT`]).
+    pub fn new() -> Result<Self, GpuError> {
+        Self::open(GpuApi::DEFAULT)
+    }
+
+    /// Open a device through `api` and compile the kernels.
+    pub fn open(api: GpuApi) -> Result<Self, GpuError> {
+        let engine: Box<dyn Run> = match api {
+            #[cfg(target_os = "macos")]
+            GpuApi::Metal => Box::new(Engine::<metal::Gpu>::new()?),
+            #[cfg(not(target_os = "macos"))]
+            GpuApi::Metal => return Err(GpuError::Setup("the Metal API needs macOS".into())),
+            GpuApi::Wgpu => Box::new(Engine::<wgpu_device::Gpu>::new()?),
+        };
+        Ok(Self { api, engine })
+    }
+
+    /// The API this backend runs on.
+    pub fn api(&self) -> GpuApi {
+        self.api
+    }
+
+    /// Count solved cells into `counter` as the work proceeds: a share of a
+    /// chunk's cells after its initial solve and after each perturbation round,
+    /// so the count reaches the chunk's size once the chunk is done.
+    pub fn with_progress(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.engine.set_progress(counter);
+        self
+    }
+
+    /// Cap the solver's GPU buffers at `bytes`; work beyond it is split into
+    /// batches.
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+        self.engine.set_memory_budget(bytes);
+        self
+    }
+
+    /// The device's name.
+    pub fn device_name(&self) -> &str {
+        self.engine.device_name()
+    }
+
+    /// Measure GPU time per kernel from now on. Every dispatch then waits for
+    /// the previous one, so wall times measured while profiling are not
+    /// representative.
+    pub fn set_profiling(&mut self, on: bool) {
+        self.engine.set_profiling(on);
+    }
+
+    /// GPU time per kernel since profiling was switched on, longest first.
+    pub fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
+        self.engine.kernel_times()
+    }
+
+    /// Largest amount of device memory the backend has had allocated.
+    pub fn peak_allocated(&self) -> usize {
+        self.engine.peak_allocated()
+    }
+
+    /// Batches run so far: one per (refine or greedy fill, set of slots).
+    pub fn batches(&self) -> usize {
+        self.engine.batches()
+    }
+}
+
+impl Backend for GpuBackend {
+    fn solve(&mut self, cells: &[PreparedCell], cfg: &SolveCfg<'_>) -> Vec<Solution> {
+        self.engine.solve(cells, cfg)
+    }
+
+    fn stages(&self) -> Stages {
+        self.engine.stages()
+    }
+}
+
+/// The solver on one device layer.
+struct Engine<D: Device> {
+    gpu: D,
     /// Kept across calls and reused while the shape and capacity fit.
-    buffers: Option<Buffers>,
+    buffers: Option<Buffers<D>>,
     budget: usize,
     stages: Stages,
     /// Per-kernel GPU time, when profiling is on.
@@ -150,60 +283,24 @@ struct Scored {
     pure: f32,
 }
 
-impl MetalBackend {
-    /// Open the default Metal device and compile the kernels.
-    pub fn new() -> Result<Self, GpuError> {
-        let gpu = Gpu::new(&source::msl())?;
-        Ok(Self {
-            gpu,
-            buffers: None,
-            budget: DEFAULT_BUDGET,
-            stages: Stages::default(),
-            profile: None,
-            peak: 0,
-            batches: 0,
-            progress: None,
-        })
-    }
-
-    /// Count solved cells into `counter` as the work proceeds: a share of a
-    /// chunk's cells after its initial solve and after each perturbation round,
-    /// so the count reaches the chunk's size once the chunk is done.
-    pub fn with_progress(mut self, counter: Arc<AtomicUsize>) -> Self {
+impl<D: Device> Run for Engine<D> {
+    fn set_progress(&mut self, counter: Arc<AtomicUsize>) {
         self.progress = Some(counter);
-        self
     }
 
-    /// Advance the progress counter to `part` of `parts` equal shares of a
-    /// chunk of `cells` cells, from `part - 1` shares.
-    fn report(&self, cells: usize, part: usize, parts: usize) {
-        if let Some(counter) = &self.progress {
-            let share = cells * part / parts - cells * (part - 1) / parts;
-            counter.fetch_add(share, Ordering::Relaxed);
-        }
-    }
-
-    /// Cap the solver's GPU buffers at `bytes`; work beyond it is split into
-    /// batches.
-    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+    fn set_memory_budget(&mut self, bytes: usize) {
         self.budget = bytes;
-        self
     }
 
-    /// The Metal device's name.
-    pub fn device_name(&self) -> &str {
-        &self.gpu.name
+    fn device_name(&self) -> &str {
+        self.gpu.name()
     }
 
-    /// Measure GPU time per kernel from now on. Every dispatch then waits for
-    /// the previous one, so wall times measured while profiling are not
-    /// representative.
-    pub fn set_profiling(&mut self, on: bool) {
+    fn set_profiling(&mut self, on: bool) {
         self.profile = on.then(BTreeMap::new);
     }
 
-    /// GPU time per kernel since profiling was switched on, longest first.
-    pub fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
+    fn kernel_times(&self) -> Vec<(&'static str, Duration)> {
         let mut out: Vec<_> = self
             .profile
             .iter()
@@ -214,14 +311,36 @@ impl MetalBackend {
         out
     }
 
-    /// Largest amount of device memory the backend has had allocated.
-    pub fn peak_allocated(&self) -> usize {
+    fn peak_allocated(&self) -> usize {
         self.peak
     }
 
-    /// Batches run so far: one per (refine or greedy fill, set of slots).
-    pub fn batches(&self) -> usize {
+    fn batches(&self) -> usize {
         self.batches
+    }
+}
+
+impl<D: Device> Engine<D> {
+    fn new() -> Result<Self, GpuError> {
+        Ok(Self {
+            gpu: D::open()?,
+            buffers: None,
+            budget: DEFAULT_BUDGET,
+            stages: Stages::default(),
+            profile: None,
+            peak: 0,
+            batches: 0,
+            progress: None,
+        })
+    }
+
+    /// Advance the progress counter to `part` of `parts` equal shares of a
+    /// chunk of `cells` cells, from `part - 1` shares.
+    fn report(&self, cells: usize, part: usize, parts: usize) {
+        if let Some(counter) = &self.progress {
+            let share = cells * part / parts - cells * (part - 1) / parts;
+            counter.fetch_add(share, Ordering::Relaxed);
+        }
     }
 
     /// Make sure the buffers fit `shape` with the given capacities.
@@ -246,7 +365,7 @@ fn perturbs(cfg: &SolveCfg<'_>, n_layers: usize) -> Option<(usize, usize, usize)
     (n_layers > 0 && top_n > 0 && dup > 0 && rounds > 0).then_some((top_n, dup, rounds))
 }
 
-impl Backend for MetalBackend {
+impl<D: Device> Backend for Engine<D> {
     fn solve(&mut self, cells: &[PreparedCell], cfg: &SolveCfg<'_>) -> Vec<Solution> {
         if cells.is_empty() {
             return Vec::new();
@@ -259,9 +378,14 @@ impl Backend for MetalBackend {
         let slots_per_cell = cfg
             .perturbations
             .map_or(1, |(top_n, dup, _)| (top_n * dup).max(1));
-        let (cells_cap, slots_cap) =
-            state::capacity(&shape, self.budget, cells.len(), slots_per_cell)
-                .unwrap_or_else(|e| panic!("{e}"));
+        let (cells_cap, slots_cap) = state::capacity(
+            &shape,
+            self.budget,
+            &self.gpu.limits(),
+            cells.len(),
+            slots_per_cell,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         self.ensure_buffers(shape, cells_cap, slots_cap)
             .unwrap_or_else(|e| panic!("{e}"));
         upload_patterns(self.buffers.as_mut().expect("just ensured"), cfg.patterns);
@@ -292,7 +416,7 @@ impl Backend for MetalBackend {
     }
 }
 
-impl MetalBackend {
+impl<D: Device> Engine<D> {
     /// Solve cells that all have `nl` layers and fit the cell buffer.
     fn solve_chunk(
         &mut self,
@@ -475,6 +599,8 @@ impl MetalBackend {
         }
         self.batches += 1;
 
+        buffers.sols.fetch(&self.gpu);
+        buffers.layers.fetch(&self.gpu);
         let sols = buffers.sols.slice::<Sol>();
         let layers = buffers.layers.slice::<u32>();
         (0..n)
@@ -555,7 +681,7 @@ impl MetalBackend {
 }
 
 /// Upload the pattern alphas and both `Σ α²` tables.
-fn upload_patterns(buffers: &mut Buffers, patterns: &Patterns) {
+fn upload_patterns<D: Device>(buffers: &mut Buffers<D>, patterns: &Patterns) {
     let alpha = buffers.alpha.slice_mut::<f32>();
     for (dst, src) in alpha.chunks_exact_mut(PLANE).zip(&patterns.top) {
         dst.copy_from_slice(&src[..]);
