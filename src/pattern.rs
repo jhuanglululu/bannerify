@@ -106,7 +106,7 @@ fn decode(id: &str) -> Chunk<TOP_HW> {
     let mut out = Chunk::<TOP_HW>::zeroed();
     for (dst, rgba) in out
         .iter_mut()
-        .zip(img.into_rgba8().as_raw().chunks_exact(4))
+        .zip(img.into_rgba8().as_raw().as_chunks::<4>().0)
     {
         *dst = f32::from(rgba[3]) * INV_255;
     }

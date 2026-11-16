@@ -167,7 +167,7 @@ pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
         let start = (y0 + y) * STRIP_PITCH + PAD_SIDE * CHANNELS;
         let out = &mut strip[start..start + BANNER_W * CHANNELS];
         let src = base + y * BANNER_W;
-        for (x, px) in out.chunks_exact_mut(CHANNELS).enumerate() {
+        for (x, px) in out.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
             for (ch, byte) in px.iter_mut().enumerate() {
                 *byte = to_u8(composite[ch][src + x]);
             }

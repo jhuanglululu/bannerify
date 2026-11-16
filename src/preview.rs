@@ -25,7 +25,12 @@ pub fn resize<S: Source + ?Sized>(src: &S, window: Window, width: usize, height:
             for y in 0..height {
                 let row = &mut strip[y * w * CHANNELS..(y + 1) * w * CHANNELS];
                 for ch in 0..CHANNELS {
-                    for (px, &v) in row.chunks_exact_mut(CHANNELS).zip(band.row(ch, y)) {
+                    for (px, &v) in row
+                        .as_chunks_mut::<CHANNELS>()
+                        .0
+                        .iter_mut()
+                        .zip(band.row(ch, y))
+                    {
                         px[ch] = v.clamp(0.0, 255.0).round() as u8;
                     }
                 }

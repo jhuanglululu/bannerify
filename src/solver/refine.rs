@@ -590,8 +590,8 @@ pub(super) fn lab_error(rgb: &[Plane; 3], lab_target: &[Plane; 3], off: usize) -
 
 /// The identity suffix: nothing is painted over these layers.
 pub(super) fn empty_suffix(suffix: &mut Suffix, off: usize) {
-    for ch in 0..3 {
-        for out in zip!(mut view_mut(&mut suffix.add[ch], off)) {
+    for plane in &mut suffix.add {
+        for out in zip!(mut view_mut(plane, off)) {
             *out = F32s::ZERO;
         }
     }

@@ -377,7 +377,7 @@ impl GpuBackend {
                         .iter()
                         .chain(&ws.lab_target)
                         .chain(&ws.lab_feature);
-                    for (out, plane) in dst.chunks_exact_mut(PLANE).zip(planes) {
+                    for (out, plane) in dst.as_chunks_mut::<PLANE>().0.iter_mut().zip(planes) {
                         out.copy_from_slice(&plane[..]);
                     }
                     (oklab, feature)
@@ -571,7 +571,12 @@ impl GpuBackend {
 /// Upload the pattern alphas and both `Σ α²` tables.
 fn upload_patterns(buffers: &mut Buffers, patterns: &Patterns) {
     let alpha = buffers.alpha.slice_mut::<f32>();
-    for (dst, src) in alpha.chunks_exact_mut(PLANE).zip(&patterns.top) {
+    for (dst, src) in alpha
+        .as_chunks_mut::<PLANE>()
+        .0
+        .iter_mut()
+        .zip(&patterns.top)
+    {
         dst.copy_from_slice(&src[..]);
     }
     let alpha2 = buffers.alpha2.slice_mut::<f32>();

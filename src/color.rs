@@ -160,7 +160,7 @@ fn build_snap_lut() -> Box<[u8; SNAP_ENTRIES]> {
     // `SNAP_ENTRIES` is a power of two and `LANES` is 1, 4 or 8, so the lane
     // chunks divide the table exactly — no remainder path.
     const _: () = assert!(SNAP_ENTRIES.is_multiple_of(16));
-    for (chunk, slot) in out.chunks_exact_mut(LANES).enumerate() {
+    for (chunk, slot) in out.as_chunks_mut::<LANES>().0.iter_mut().enumerate() {
         let base = chunk * LANES;
         let comp = |shift: u32| {
             F32s::from_array(std::array::from_fn(|i| {

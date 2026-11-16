@@ -145,14 +145,14 @@ pub fn page(wall: &Wall<'_>, report: &Report<'_>) -> String {
     // ---- materials ---------------------------------------------------------
     out.push_str("<h2>Materials <span class=\"hint\">everything the banners cost</span></h2>\n\n");
     let mut items: Vec<(usize, String, usize)> = Vec::new();
-    for c in 0..NUM_COLORS {
-        if materials.wool[c] > 0 {
-            items.push((c, format!("{} wool", color_label(c)), materials.wool[c]));
+    for (c, &count) in materials.wool[..NUM_COLORS].iter().enumerate() {
+        if count > 0 {
+            items.push((c, format!("{} wool", color_label(c)), count));
         }
     }
-    for c in 0..NUM_COLORS {
-        if materials.dye[c] > 0 {
-            items.push((c, format!("{} dye", color_label(c)), materials.dye[c]));
+    for (c, &count) in materials.dye[..NUM_COLORS].iter().enumerate() {
+        if count > 0 {
+            items.push((c, format!("{} dye", color_label(c)), count));
         }
     }
     items.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
@@ -298,11 +298,11 @@ fn blob(out: &mut String, wall: &Wall<'_>) {
             out.push(',');
         }
         out.push('[');
-        for col in 0..wall.columns {
+        for (col, ids) in wall.block_ids[..wall.columns].iter().enumerate() {
             if col > 0 {
                 out.push(',');
             }
-            out.push_str(&wall.block_ids[col][row].to_string());
+            out.push_str(&ids[row].to_string());
         }
         out.push(']');
     }

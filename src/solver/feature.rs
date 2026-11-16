@@ -305,15 +305,17 @@ const CROSS_WAYS: usize = 8;
 /// `X[d] = Σ_{snap == d} α₁·α₂` — the one genuinely per-pair reduction, and the
 /// search's entire hot loop.
 fn cross(snap: &[u8], alpha1: &[f32], alpha2: &[f32]) -> [f32; NUM_COLORS] {
-    // Both patch sizes are multiples of 16, so `chunks_exact` never drops a
+    // Both patch sizes are multiples of 16, so `as_chunks` never leaves a
     // remainder and the tail path this function does not have is unreachable.
     debug_assert!(snap.len().is_multiple_of(CROSS_WAYS));
 
     let mut ways = [[0.0_f32; NUM_COLORS]; CROSS_WAYS];
     let chunks = snap
-        .chunks_exact(CROSS_WAYS)
-        .zip(alpha1.chunks_exact(CROSS_WAYS))
-        .zip(alpha2.chunks_exact(CROSS_WAYS));
+        .as_chunks::<CROSS_WAYS>()
+        .0
+        .iter()
+        .zip(alpha1.as_chunks::<CROSS_WAYS>().0)
+        .zip(alpha2.as_chunks::<CROSS_WAYS>().0);
     for ((snap, a1), a2) in chunks {
         for (way, ((&d, &a1), &a2)) in ways.iter_mut().zip(snap.iter().zip(a1).zip(a2)) {
             way[d as usize] += a1 * a2;
