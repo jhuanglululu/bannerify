@@ -1,5 +1,7 @@
 # bannerify
 
+**English** | [繁體中文](README.zh-TW.md)
+
 Approximate an image with a wall of Minecraft banners.
 
 Give it an image and a wall size; it picks a base color and a stack of dyed
@@ -19,9 +21,16 @@ cargo build --release
 ```
 
 The binary is `target/release/bannerify`. All assets (banner patterns,
-block textures) are embedded — the binary is standalone. Windows and Linux
-x86 builds target AVX2+FMA by default (any Intel/AMD CPU from ~2013 onwards);
-build with `--features force-scalar` for older machines.
+block textures, GPU shaders) are embedded — the binary is standalone.
+
+The GPU backend is always compiled in; there is no feature flag for it and
+no GPU SDK is needed to build. At run time it uses the system's GPU driver,
+and falls back to the CPU when no GPU can be opened (see
+[GPU backend](#gpu-backend)).
+
+Windows and Linux x86 builds target AVX2+FMA by default (any Intel/AMD CPU
+from ~2013 onwards), which the CPU side requires even when the solve runs
+on the GPU; build with `--features force-scalar` for older machines.
 
 ## Usage
 
