@@ -16,9 +16,24 @@ materials list, and downloadable `.schem` / `.litematic` schematics.
 
 ## Build
 
-Building needs Cargo, the Rust build tool. If you don't have it,
-[install Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
-first.
+Building needs a C linker and Cargo, the Rust build tool. Install the
+linker first:
+
+- **Windows:** the MSVC Build Tools, a download of several GB. Install them
+  before Rust; if Rust comes first, its installer may install Visual Studio
+  Community by itself.
+
+  ```sh
+  winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  ```
+
+- **Debian and Ubuntu, including WSL:** `sudo apt install build-essential`
+- **macOS:** `xcode-select --install`
+
+Then
+[install Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html).
+On Windows, open a new terminal afterwards: terminals that were already open
+do not have `cargo` on their `PATH`.
 
 ```sh
 cargo install --path .
@@ -29,6 +44,10 @@ which the Rust installer puts on your `PATH`, so `bannerify` works from any
 folder. All assets (banner patterns, block textures, GPU shaders) are
 embedded — the binary is standalone.
 
+If `git clone` fails on Windows with "Filename too long", the folder you are
+cloning into has a very long path: clone into a shorter one, or run
+`git config --global core.longpaths true`.
+
 The GPU backend is always compiled in; there is no feature flag for it and
 no GPU SDK is needed to build. At run time it uses the system's GPU driver,
 and falls back to the CPU when no GPU can be opened (see
@@ -36,8 +55,8 @@ and falls back to the CPU when no GPU can be opened (see
 
 Windows and Linux x86 builds target AVX2+FMA by default (any Intel/AMD CPU
 from ~2013 onwards), which the CPU side requires even when the solve runs
-on the GPU; install with `cargo install --path . --features force-scalar`
-for older machines.
+on the GPU. On an older machine `bannerify` exits with code `5`; install
+with `cargo install --path . --features force-scalar` there.
 
 ## Install with AI
 
@@ -48,27 +67,15 @@ the agent:
 ```text
 Install bannerify from https://github.com/jhuanglululu/bannerify.
 
-1. Check that `cargo` is available. If it is not, install Rust with rustup
-   from https://rustup.rs. Ask me before installing anything else.
-2. Clone the repository and run `cargo install --path .` inside it. This
-   puts the binary in `~/.cargo/bin`.
-3. Test the install from the repository folder:
+1. Clone the repository and follow the Build section of its README.
+2. Ask me before installing anything other than bannerify. If a command
+   needs sudo or administrator rights, give it to me to run.
+3. Test from the repository folder, then delete `test.html`:
    `bannerify docs/example.png test.html --row 10 --debug`
-   If it exits with code 5, my CPU lacks AVX2+FMA: reinstall with
-   `cargo install --path . --features force-scalar` and run the test again.
-4. Delete `test.html`. Apart from installing Rust and bannerify, do not
-   change anything outside the repository folder.
+4. Change nothing else on my machine.
 
-When you are done, report:
-- the output of `which bannerify` (`where bannerify` on Windows) and of
-  `bannerify --version`; if the command is not found, tell me how to add
-  `~/.cargo/bin` to my `PATH` instead of editing my shell config yourself
-- whether the test run succeeded, and how long it took
-- which backend the test run used (GPU or CPU), with the GPU's name or the
-  reason it fell back to the CPU
-- whether you needed `force-scalar`
-- everything you installed or changed on my machine
-- any step that failed, with the exact error message
+Then report where bannerify was installed, the test's `backend:` line and
+run time, everything you installed or changed, and any error in full.
 ```
 
 ## Usage
@@ -176,6 +183,10 @@ DX12 on Windows, Metal on macOS). Linux needs the Vulkan loader
 (`libvulkan.so.1`, package `libvulkan1` on Debian and Ubuntu) next to the
 GPU driver.
 
+Under WSL the solve runs on the CPU: Ubuntu's Mesa packages have no Vulkan
+driver for the GPU that WSL exposes. To use the GPU on a Windows machine,
+build and run bannerify on Windows itself.
+
 Whole-run times in seconds for a 2048x1152 image, on a Core Ultra 5 225
 with an RTX 3090 and on an M1 Pro:
 
@@ -200,7 +211,8 @@ banners differed from the CPU's while the mean error differed by less than
 
 - `--backend auto` *(default)* — use the GPU whenever one can be opened,
   whatever the wall size or settings; otherwise solve on the CPU, with a
-  warning that gives the reason.
+  warning and a `backend: cpu (GPU unavailable: ...)` line that give the
+  reason.
 - `--backend gpu` — use the GPU; if it cannot be used, stop with exit code
   `6`. Software renderers are never used.
 - `--backend cpu` — use the CPU solver on every worker thread.

@@ -15,8 +15,23 @@
 
 ## 建置
 
-建置需要 Rust 的建置工具 Cargo。還沒安裝的話，請先
+建置需要 C 連結器和 Rust 的建置工具 Cargo。請先安裝連結器：
+
+- **Windows：**MSVC Build Tools，下載量有數 GB。請在安裝 Rust 之前先
+  裝好；如果先裝 Rust，它的安裝程式可能會自行安裝 Visual Studio
+  Community。
+
+  ```sh
+  winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  ```
+
+- **Debian 和 Ubuntu（包含 WSL）：**`sudo apt install build-essential`
+- **macOS：**`xcode-select --install`
+
+接著
 [安裝 Rust 與 Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)。
+在 Windows 上，安裝後請開一個新的終端機：原本就開著的終端機，`PATH`
+裡不會有 `cargo`。
 
 ```sh
 cargo install --path .
@@ -27,13 +42,18 @@ cargo install --path .
 `bannerify`。所有素材（旗幟圖案、方塊材質、GPU 著色器）都內嵌在執行檔
 中，可以單獨使用。
 
+如果 `git clone` 在 Windows 上因為「Filename too long」失敗，代表目標
+資料夾的路徑太長：請改 clone 到路徑較短的資料夾，或執行
+`git config --global core.longpaths true`。
+
 GPU 後端一律會編譯進去，沒有對應的 feature 旗標，建置時也不需要任何 GPU
 SDK。執行時它使用系統的 GPU 驅動程式，無法開啟 GPU 時會改用 CPU（見
 [GPU 後端](#gpu-後端)）。
 
 Windows 和 Linux 的 x86 版本預設以 AVX2+FMA 為目標（約 2013 年之後的
-Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要這些指令集；
-較舊的機器請改用 `cargo install --path . --features force-scalar` 安裝。
+Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要這些指令集。
+在較舊的機器上 `bannerify` 會以結束代碼 `5` 結束；這時請改用
+`cargo install --path . --features force-scalar` 安裝。
 
 ## 用 AI 安裝
 
@@ -43,27 +63,15 @@ Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要
 ```text
 請從 https://github.com/jhuanglululu/bannerify 安裝 bannerify。
 
-1. 確認有 `cargo` 可用。沒有的話，用 https://rustup.rs 的 rustup 安裝
-   Rust。要安裝其他任何東西之前，請先問我。
-2. clone 這個 repository，在裡面執行 `cargo install --path .`。執行檔會
-   放在 `~/.cargo/bin`。
-3. 在 repository 資料夾內測試安裝結果：
+1. clone 這個 repository，照 README 的「建置」一節操作。
+2. 除了 bannerify 之外，安裝任何東西之前請先問我。需要 sudo 或系統
+   管理員權限的指令，請交給我自己執行。
+3. 在 repository 資料夾內測試，然後刪除 `test.html`：
    `bannerify docs/example.png test.html --row 10 --debug`
-   如果結束代碼是 5，代表我的 CPU 不支援 AVX2+FMA：請改用
-   `cargo install --path . --features force-scalar` 重新安裝，再測試一次。
-4. 刪除 `test.html`。除了安裝 Rust 和 bannerify 之外，不要更動
-   repository 資料夾以外的任何東西。
+4. 不要更動我電腦上的其他任何東西。
 
-完成後請回報：
-- `which bannerify`（Windows 用 `where bannerify`）和
-  `bannerify --version` 的輸出；如果找不到指令，請告訴我怎麼把
-  `~/.cargo/bin` 加進 `PATH`，不要自己修改我的 shell 設定檔
-- 測試是否成功，花了多久
-- 測試用的是哪個後端（GPU 或 CPU），並附上 GPU 的名稱，或改用 CPU 的
-  原因
-- 是否用到 `force-scalar`
-- 你在我的電腦上安裝或更動的所有東西
-- 任何失敗的步驟，並附上完整的錯誤訊息
+完成後請回報：bannerify 安裝在哪裡、測試輸出的 `backend:` 那一行和執行
+時間、你安裝或更動的所有東西，以及任何錯誤的完整訊息。
 ```
 
 ## 使用方式
@@ -163,6 +171,10 @@ bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debri
 驅動程式之外，還需要 Vulkan loader（`libvulkan.so.1`，在 Debian 和
 Ubuntu 上是 `libvulkan1` 套件）。
 
+在 WSL 裡求解會在 CPU 上執行：Ubuntu 的 Mesa 套件沒有能驅動 WSL 所提供
+GPU 的 Vulkan 驅動程式。要在 Windows 電腦上使用 GPU，請直接在 Windows
+上建置和執行 bannerify。
+
 以下是 2048x1152 圖片的完整執行時間（秒），測試機器為搭配 RTX 3090 的
 Core Ultra 5 225，以及 M1 Pro：
 
@@ -184,7 +196,8 @@ GPU 的品質和 CPU 相同，但選出的旗幟不會完全一樣。GPU 運算�
 同一個裝置用同一個種子，每次執行的結果都相同。
 
 - `--backend auto`*（預設）*：只要能開啟 GPU 就使用，不論牆的尺寸或
-  設定；否則在 CPU 上求解，並顯示說明原因的警告。
+  設定；否則在 CPU 上求解，並在警告和
+  `backend: cpu (GPU unavailable: ...)` 那一行說明原因。
 - `--backend gpu`：使用 GPU；無法使用時以結束代碼 `6` 停止。絕不會使用
   軟體算繪器。
 - `--backend cpu`：在所有工作執行緒上使用 CPU 求解器。
