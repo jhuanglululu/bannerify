@@ -16,12 +16,18 @@ materials list, and downloadable `.schem` / `.litematic` schematics.
 
 ## Build
 
+Building needs Cargo, the Rust build tool. If you don't have it,
+[install Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
+first.
+
 ```sh
-cargo build --release
+cargo install --path .
 ```
 
-The binary is `target/release/bannerify`. All assets (banner patterns,
-block textures, GPU shaders) are embedded — the binary is standalone.
+This builds a release binary and copies it to `~/.cargo/bin/bannerify`,
+which the Rust installer puts on your `PATH`, so `bannerify` works from any
+folder. All assets (banner patterns, block textures, GPU shaders) are
+embedded — the binary is standalone.
 
 The GPU backend is always compiled in; there is no feature flag for it and
 no GPU SDK is needed to build. At run time it uses the system's GPU driver,
@@ -30,7 +36,40 @@ and falls back to the CPU when no GPU can be opened (see
 
 Windows and Linux x86 builds target AVX2+FMA by default (any Intel/AMD CPU
 from ~2013 onwards), which the CPU side requires even when the solve runs
-on the GPU; build with `--features force-scalar` for older machines.
+on the GPU; install with `cargo install --path . --features force-scalar`
+for older machines.
+
+## Install with AI
+
+If you use an AI coding agent (Claude Code, Codex, Cursor and the like), it
+can do the build for you. Read the instruction below, then paste it into
+the agent:
+
+```text
+Install bannerify from https://github.com/jhuanglululu/bannerify.
+
+1. Check that `cargo` is available. If it is not, install Rust with rustup
+   from https://rustup.rs. Ask me before installing anything else.
+2. Clone the repository and run `cargo install --path .` inside it. This
+   puts the binary in `~/.cargo/bin`.
+3. Test the install from the repository folder:
+   `bannerify docs/example.png test.html --row 10 --debug`
+   If it exits with code 5, my CPU lacks AVX2+FMA: reinstall with
+   `cargo install --path . --features force-scalar` and run the test again.
+4. Delete `test.html`. Apart from installing Rust and bannerify, do not
+   change anything outside the repository folder.
+
+When you are done, report:
+- the output of `which bannerify` (`where bannerify` on Windows) and of
+  `bannerify --version`; if the command is not found, tell me how to add
+  `~/.cargo/bin` to my `PATH` instead of editing my shell config yourself
+- whether the test run succeeded, and how long it took
+- which backend the test run used (GPU or CPU), with the GPU's name or the
+  reason it fell back to the CPU
+- whether you needed `force-scalar`
+- everything you installed or changed on my machine
+- any step that failed, with the exact error message
+```
 
 ## Usage
 

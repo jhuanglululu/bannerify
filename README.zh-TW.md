@@ -15,12 +15,17 @@
 
 ## 建置
 
+建置需要 Rust 的建置工具 Cargo。還沒安裝的話，請先
+[安裝 Rust 與 Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)。
+
 ```sh
-cargo build --release
+cargo install --path .
 ```
 
-執行檔位於 `target/release/bannerify`。所有素材（旗幟圖案、方塊材質、
-GPU 著色器）都內嵌在執行檔中，可以單獨使用。
+這會建置 release 版的執行檔，並複製到 `~/.cargo/bin/bannerify`。Rust
+安裝程式會把這個資料夾加進 `PATH`，所以在任何資料夾都能執行
+`bannerify`。所有素材（旗幟圖案、方塊材質、GPU 著色器）都內嵌在執行檔
+中，可以單獨使用。
 
 GPU 後端一律會編譯進去，沒有對應的 feature 旗標，建置時也不需要任何 GPU
 SDK。執行時它使用系統的 GPU 驅動程式，無法開啟 GPU 時會改用 CPU（見
@@ -28,7 +33,38 @@ SDK。執行時它使用系統的 GPU 驅動程式，無法開啟 GPU 時會改�
 
 Windows 和 Linux 的 x86 版本預設以 AVX2+FMA 為目標（約 2013 年之後的
 Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要這些指令集；
-較舊的機器請加上 `--features force-scalar` 建置。
+較舊的機器請改用 `cargo install --path . --features force-scalar` 安裝。
+
+## 用 AI 安裝
+
+如果你使用 AI 程式代理（Claude Code、Codex、Cursor 等），可以讓它替你
+建置。請先讀完下面的指示，再貼給代理：
+
+```text
+請從 https://github.com/jhuanglululu/bannerify 安裝 bannerify。
+
+1. 確認有 `cargo` 可用。沒有的話，用 https://rustup.rs 的 rustup 安裝
+   Rust。要安裝其他任何東西之前，請先問我。
+2. clone 這個 repository，在裡面執行 `cargo install --path .`。執行檔會
+   放在 `~/.cargo/bin`。
+3. 在 repository 資料夾內測試安裝結果：
+   `bannerify docs/example.png test.html --row 10 --debug`
+   如果結束代碼是 5，代表我的 CPU 不支援 AVX2+FMA：請改用
+   `cargo install --path . --features force-scalar` 重新安裝，再測試一次。
+4. 刪除 `test.html`。除了安裝 Rust 和 bannerify 之外，不要更動
+   repository 資料夾以外的任何東西。
+
+完成後請回報：
+- `which bannerify`（Windows 用 `where bannerify`）和
+  `bannerify --version` 的輸出；如果找不到指令，請告訴我怎麼把
+  `~/.cargo/bin` 加進 `PATH`，不要自己修改我的 shell 設定檔
+- 測試是否成功，花了多久
+- 測試用的是哪個後端（GPU 或 CPU），並附上 GPU 的名稱，或改用 CPU 的
+  原因
+- 是否用到 `force-scalar`
+- 你在我的電腦上安裝或更動的所有東西
+- 任何失敗的步驟，並附上完整的錯誤訊息
+```
 
 ## 使用方式
 
