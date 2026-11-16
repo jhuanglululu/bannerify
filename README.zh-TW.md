@@ -34,26 +34,30 @@
 裡不會有 `cargo`。
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/jhuanglululu/bannerify
 ```
 
-這會建置 release 版的執行檔，並複製到 `~/.cargo/bin/bannerify`。Rust
-安裝程式會把這個資料夾加進 `PATH`，所以在任何資料夾都能執行
-`bannerify`。所有素材（旗幟圖案、方塊材質、GPU 著色器）都內嵌在執行檔
-中，可以單獨使用。
+這會下載原始碼、建置 release 版的執行檔，並複製到
+`~/.cargo/bin/bannerify`；不需要 clone 這個 repository，也不需要安裝
+`git`。Rust 安裝程式會把 `~/.cargo/bin` 加進 `PATH`，所以在任何資料夾都能
+執行 `bannerify`。所有素材（旗幟圖案、方塊材質、GPU 著色器）都內嵌在
+執行檔中，可以單獨使用。
 
-如果 `git clone` 在 Windows 上因為「Filename too long」失敗，代表目標
-資料夾的路徑太長：請改 clone 到路徑較短的資料夾，或執行
-`git config --global core.longpaths true`。
+如果是 Intel 或 AMD 的 CPU（Windows、Linux 或 Intel Mac），請改用這個
+指令：
+
+```sh
+cargo install --git https://github.com/jhuanglululu/bannerify --config "build.rustflags=['-C','target-feature=+avx2,+fma']"
+```
+
+它會以 AVX2+FMA 建置 CPU 端（約 2013 年之後的 Intel/AMD CPU 都支援）；
+即使求解在 GPU 上執行，CPU 端仍然會用到這些指令集。第一個指令不含這些
+旗標，在 x86 上會建置出較慢的純量版本。以 AVX2+FMA 建置的版本在不支援的
+CPU 上會以結束代碼 `5` 結束；這時請改用第一個指令安裝。
 
 GPU 後端一律會編譯進去，沒有對應的 feature 旗標，建置時也不需要任何 GPU
 SDK。執行時它使用系統的 GPU 驅動程式，無法開啟 GPU 時會改用 CPU（見
 [GPU 後端](#gpu-後端)）。
-
-Windows 和 Linux 的 x86 版本預設以 AVX2+FMA 為目標（約 2013 年之後的
-Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要這些指令集。
-在較舊的機器上 `bannerify` 會以結束代碼 `5` 結束；這時請改用
-`cargo install --path . --features force-scalar` 安裝。
 
 ## 用 AI 安裝
 
@@ -63,11 +67,13 @@ Intel/AMD CPU 都支援），即使求解在 GPU 上執行，CPU 端仍然需要
 ```text
 請從 https://github.com/jhuanglululu/bannerify 安裝 bannerify。
 
-1. clone 這個 repository，照 README 的「建置」一節操作。
+1. 照 README 的「建置」一節操作。不要 clone 這個 repository。
 2. 除了 bannerify 之外，安裝任何東西之前請先問我。需要 sudo 或系統
    管理員權限的指令，請交給我自己執行。
-3. 在 repository 資料夾內測試，然後刪除 `test.html`：
-   `bannerify docs/example.png test.html --row 10 --debug`
+3. 下載
+   https://raw.githubusercontent.com/jhuanglululu/bannerify/main/docs/example.png
+   並用它測試，然後刪除 `example.png` 和 `test.html`：
+   `bannerify example.png test.html --row 10 --debug`
 4. 不要更動我電腦上的其他任何東西。
 
 完成後請回報：bannerify 安裝在哪裡、測試輸出的 `backend:` 那一行和執行

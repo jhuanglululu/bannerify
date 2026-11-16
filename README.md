@@ -36,27 +36,32 @@ On Windows, open a new terminal afterwards: terminals that were already open
 do not have `cargo` on their `PATH`.
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/jhuanglululu/bannerify
 ```
 
-This builds a release binary and copies it to `~/.cargo/bin/bannerify`,
-which the Rust installer puts on your `PATH`, so `bannerify` works from any
-folder. All assets (banner patterns, block textures, GPU shaders) are
-embedded — the binary is standalone.
+This downloads the source, builds a release binary and copies it to
+`~/.cargo/bin/bannerify`; you do not need to clone the repository or have
+`git` installed. The Rust installer puts `~/.cargo/bin` on your `PATH`, so
+`bannerify` works from any folder. All assets (banner patterns, block
+textures, GPU shaders) are embedded — the binary is standalone.
 
-If `git clone` fails on Windows with "Filename too long", the folder you are
-cloning into has a very long path: clone into a shorter one, or run
-`git config --global core.longpaths true`.
+On an Intel or AMD CPU (Windows, Linux or an Intel Mac), use this command
+instead:
+
+```sh
+cargo install --git https://github.com/jhuanglululu/bannerify --config "build.rustflags=['-C','target-feature=+avx2,+fma']"
+```
+
+It builds the CPU side with AVX2+FMA (any Intel/AMD CPU from ~2013
+onwards), which the CPU side uses even when the solve runs on the GPU. The
+first command leaves these out and builds slower scalar code on x86. A
+build with AVX2+FMA exits with code `5` on a CPU that lacks them; install
+with the first command there.
 
 The GPU backend is always compiled in; there is no feature flag for it and
 no GPU SDK is needed to build. At run time it uses the system's GPU driver,
 and falls back to the CPU when no GPU can be opened (see
 [GPU backend](#gpu-backend)).
-
-Windows and Linux x86 builds target AVX2+FMA by default (any Intel/AMD CPU
-from ~2013 onwards), which the CPU side requires even when the solve runs
-on the GPU. On an older machine `bannerify` exits with code `5`; install
-with `cargo install --path . --features force-scalar` there.
 
 ## Install with AI
 
@@ -67,11 +72,13 @@ the agent:
 ```text
 Install bannerify from https://github.com/jhuanglululu/bannerify.
 
-1. Clone the repository and follow the Build section of its README.
+1. Follow the Build section of its README. Do not clone the repository.
 2. Ask me before installing anything other than bannerify. If a command
    needs sudo or administrator rights, give it to me to run.
-3. Test from the repository folder, then delete `test.html`:
-   `bannerify docs/example.png test.html --row 10 --debug`
+3. Download
+   https://raw.githubusercontent.com/jhuanglululu/bannerify/main/docs/example.png
+   and test with it, then delete `example.png` and `test.html`:
+   `bannerify example.png test.html --row 10 --debug`
 4. Change nothing else on my machine.
 
 Then report where bannerify was installed, the test's `backend:` line and
