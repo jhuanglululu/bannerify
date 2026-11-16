@@ -592,6 +592,10 @@ fn run(config: &Config) {
     let t = Instant::now();
     let gpu = open_gpu(config);
     let t_backend = t.elapsed();
+    match &gpu {
+        Some(gpu) => info!("backend: gpu ({})", gpu.device_name()),
+        None => info!("backend: cpu"),
+    }
 
     // ---- decode (and the one interleaved -> planar conversion) -------------
     let t = Instant::now();
