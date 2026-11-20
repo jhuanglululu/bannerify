@@ -128,13 +128,32 @@ pub(crate) fn build(ws: &mut Workspace, alphas: &[Plane], lambda: f32) -> Map {
     snap(feat, target, start);
     reduce(feat, alphas, start);
 
-    let map = search(feat, alphas, start);
+    let (_, map) = search(feat, alphas, start, f32::NEG_INFINITY).expect("every banner beats -inf");
 
     paint(feature, &map, alphas, off);
     convert_target(feature, lab_feature, off);
     blend_target(target, feature, lambda, off);
 
     map
+}
+
+/// The search on `target`'s active view (from element `start`), started from
+/// an incumbent score of `floor` carried over from another patch of the same
+/// size: the best banner's score if one beats `floor` strictly, else `None`.
+///
+/// The floor takes part in the pruning, so a patch that cannot beat it costs
+/// little more than the snap and the pair-independent tables. Used by the
+/// per-cell shift ([`super::shift`]), which compares scores across patches.
+pub(super) fn best_score(
+    feat: &mut Buffers,
+    target: &[Plane; 3],
+    alphas: &[Plane],
+    start: usize,
+    floor: f32,
+) -> Option<f32> {
+    snap(feat, target, start);
+    reduce(feat, alphas, start);
+    search(feat, alphas, start, floor).map(|(score, _)| score)
 }
 
 /// Fold the feature term into the sRGB target, **in place**.
@@ -213,19 +232,23 @@ fn reduce(feat: &mut Buffers, alphas: &[Plane], start: usize) {
 }
 
 /// Exhaustively score every ordered pattern pair, the degenerate banners
-/// included, and return the best.
-fn search(feat: &Buffers, alphas: &[Plane], start: usize) -> Map {
+/// included, and return the best with its score — if it scores strictly above
+/// `floor`, the incumbent to beat; `None` otherwise.
+fn search(feat: &Buffers, alphas: &[Plane], start: usize, floor: f32) -> Option<(f32, Map)> {
     let snap = &feat.snap[start..];
+    let mut best = (floor, None);
 
     // Base only: every pixel votes with weight 1 for its own dye.
     let (base, score) = argmax(&feat.count);
-    let mut best = (
-        score,
-        Map {
-            base,
-            layers: [None, None],
-        },
-    );
+    if score > best.0 {
+        best = (
+            score,
+            Some(Map {
+                base,
+                layers: [None, None],
+            }),
+        );
+    }
 
     // One layer: `h₀ = N − A`, `h₁ = A`.
     for p in 0..alphas.len() {
@@ -235,10 +258,10 @@ fn search(feat: &Buffers, alphas: &[Plane], start: usize) -> Map {
         if base_score + dye_score > best.0 {
             best = (
                 base_score + dye_score,
-                Map {
+                Some(Map {
                     base,
                     layers: [Some((p, dye)), None],
-                },
+                }),
             );
         }
     }
@@ -283,16 +306,16 @@ fn search(feat: &Buffers, alphas: &[Plane], start: usize) -> Map {
             if score > best.0 {
                 best = (
                     score,
-                    Map {
+                    Some(Map {
                         base: best_base.0,
                         layers: [Some((lower, best_dye1.0)), Some((upper, dye2))],
-                    },
+                    }),
                 );
             }
         }
     }
 
-    best.1
+    best.1.map(|map| (best.0, map))
 }
 
 /// Interleaved accumulator sets of the cross term. Neighbouring pixels usually

@@ -151,6 +151,12 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   distance to the nearest of the 16 dye colors, times ν, so a banner drawn
   in clean dye colors beats one whose blends average to the right shade.
   It penalises photographic shades, so expect a higher error on photographs.
+- `-S, --shift-range X Y` — lets each banner be solved against the image
+  moved by up to `X` pixels sideways (at most `2`) and `Y` up or down (at
+  most `4`), whichever position a clean banner fits best (default `0 0`,
+  off). Use it when image edges fall just beside the pattern edges. The
+  banner is still drawn at its real position, and the reported error is
+  measured against the unmoved image, so the reported error rises.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds
   and keep the best result.
 - `-L, --layer-range MIN MAX` — how many pattern layers a banner may use

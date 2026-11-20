@@ -198,6 +198,15 @@ pub struct Args {
     #[arg(short = 'U', long, value_name = "WEIGHT")]
     pub purity_weight: Option<f32>,
 
+    /// Per-banner shift: [X Y] [default: 0 0, off]; each banner may be solved
+    /// against the image moved up to X pixels sideways (at most 2) and Y up or
+    /// down (at most 4), whichever lets a clean banner fit best. The banner is
+    /// still drawn at its real position, and the reported error is measured
+    /// against the unmoved image, so it rises
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'S', long, num_args = 2, value_names = ["X", "Y"])]
+    pub shift_range: Vec<usize>,
+
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]

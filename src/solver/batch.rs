@@ -16,8 +16,9 @@ pub struct PreparedCell {
     pub row: usize,
     /// Pattern layers this cell gets.
     pub n_layers: usize,
-    /// The cell's sRGB target as gathered from the resampled image: not
-    /// converted, not blended with a feature map.
+    /// The cell's sRGB target as gathered from the resampled image, at the
+    /// cell's chosen shift ([`super::shift`]): not converted, not blended with
+    /// a feature map.
     pub target: [Plane; 3],
     /// The perturbation stream positioned where this cell's draws start, so
     /// the cell's result does not depend on which batch it lands in.

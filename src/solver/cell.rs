@@ -18,6 +18,7 @@ use crate::geometry::{
 };
 use crate::resample::ColBand;
 use crate::simd::Chunk;
+use crate::solver::refine::{convert_target, lab_error};
 use crate::solver::workspace::{Plane, Solution, lane_offset, rebuild_prefixes};
 
 /// Channels in the preview canvas.
@@ -91,13 +92,30 @@ impl<'a> BandView<'a> {
     /// Only the row's active view of each plane is written, leaving the head of
     /// a lower row's planes untouched.
     pub fn gather(&self, row: usize, col: usize, target: &mut [Plane; CHANNELS]) {
+        self.gather_at(row, col, (0, 0), target);
+    }
+
+    /// [`BandView::gather`] of the patch displaced by `(dx, dy)` wall pixels:
+    /// pixel `(x, y)` of the patch reads wall pixel `(x + dx, y + dy)` of the
+    /// cell's own patch rectangle. Wall pixels outside the band read as the pad
+    /// colour, as everywhere else.
+    pub fn gather_at(
+        &self,
+        row: usize,
+        col: usize,
+        (dx, dy): (isize, isize),
+        target: &mut [Plane; CHANNELS],
+    ) {
         let (y0, rows, base) = patch_rows(row);
         let x0 = offset_column(col);
 
         for y in 0..rows {
-            let band_y = self
-                .band
-                .and_then(|b| (y0 + y).checked_sub(self.y).filter(|y| *y < b.height));
+            let band_y = self.band.and_then(|b| {
+                (y0 + y)
+                    .checked_add_signed(dy)
+                    .and_then(|y| y.checked_sub(self.y))
+                    .filter(|y| *y < b.height)
+            });
             for (ch, plane) in target.iter_mut().enumerate() {
                 let out = &mut plane[base + y * BANNER_W..base + (y + 1) * BANNER_W];
                 let (Some(band), Some(band_y)) = (self.band, band_y) else {
@@ -107,7 +125,8 @@ impl<'a> BandView<'a> {
                 let src = band.row(ch, band_y);
                 for (x, dst) in out.iter_mut().enumerate() {
                     *dst = (x0 + x)
-                        .checked_sub(self.x)
+                        .checked_add_signed(dx)
+                        .and_then(|x| x.checked_sub(self.x))
                         .and_then(|x| src.get(x).copied())
                         .unwrap_or(self.fallback[ch]);
                 }
@@ -173,6 +192,17 @@ pub fn paint_cell(strip: &mut [u8], row: usize, composite: &[Plane; CHANNELS]) {
             }
         }
     }
+}
+
+/// `Σ ΔE` of a cell's composite against `target`, both on banner row `row`'s
+/// patch: the pure-target error [`Solution::error`] carries, measured against a
+/// target the solver did not solve against (the unshifted patch, under
+/// `--shift-range`).
+pub fn target_error(composite: &[Plane; CHANNELS], target: &[Plane; CHANNELS], row: usize) -> f32 {
+    let off = lane_offset(row);
+    let mut lab = [Chunk::zeroed(); CHANNELS];
+    convert_target(target, &mut lab, off);
+    lab_error(composite, &lab, off)
 }
 
 #[inline]

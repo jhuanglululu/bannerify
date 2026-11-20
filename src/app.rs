@@ -3,10 +3,11 @@
 //!
 //! 1. prepare (rayon over columns): resample the column band, match and paint
 //!    the background blocks, gather every banner cell's target into a
-//!    [`PreparedCell`];
+//!    [`PreparedCell`] (at the cell's chosen shift, under `--shift-range`);
 //! 2. solve: the group's cells go to a [`Backend`] as one batch;
 //! 3. paint (rayon over columns): each solution's composite is rebuilt on the
-//!    CPU and painted into its column strip.
+//!    CPU and painted into its column strip, and a cell solved against a
+//!    shifted patch has its error re-measured against the unshifted one.
 //!
 //! Columns, never rows: banners bridge every horizontal block seam, so no
 //! horizontal cut lets a column item own complete block cells, while a
@@ -31,7 +32,7 @@ use crate::cli::config::{Config, format_name};
 use crate::cli::{Args, BackendChoice, ListKind, OutputFormat};
 use crate::color::{COLOR_NAMES, NUM_COLORS};
 use crate::export::{Wall, color_label, hex, html, json as json_export, pattern_label, schematic};
-use crate::geometry::BLOCK_SIDE;
+use crate::geometry::{BANNER_W, BLOCK_SIDE};
 use crate::gpu::GpuBackend;
 use crate::layout::Layout;
 use crate::logger::{
@@ -44,7 +45,10 @@ use crate::progress::Progress;
 use crate::resample::{InterleavedU8, Plan, PlanarU8, Window};
 use crate::simd::Chunk;
 use crate::solver::block::{BlockScratch, match_cell};
-use crate::solver::cell::{BandView, Compositor, STRIP_PITCH, paint_block, paint_cell};
+use crate::solver::cell::{
+    BandView, Compositor, STRIP_PITCH, paint_block, paint_cell, patch_rows, target_error,
+};
+use crate::solver::shift::ShiftSearch;
 use crate::solver::variance::{LayerGrid, layer_grid};
 use crate::solver::{Backend, CpuBackend, Plane, PreparedCell, Rng, Solution, SolveCfg, perturb};
 
@@ -102,6 +106,8 @@ struct ColContext<'a> {
     /// Perturbation RNG seed; each column derives its stream from it and its
     /// column index.
     seed: u64,
+    /// `--shift-range`; `(0, 0)` gathers every cell at its real position.
+    shift_range: (usize, usize),
 }
 
 /// What preparing one column produces besides its cells.
@@ -117,6 +123,13 @@ struct PreparedColumn {
     resample: Duration,
     /// CPU time spent matching and painting background blocks.
     blocks_cpu: Duration,
+    /// Per banner cell, top to bottom: the patch at zero shift when the cell
+    /// was gathered at a non-zero one, which its reported error is measured
+    /// against. `None` for every cell when the shift range is `(0, 0)`.
+    unshifted: Vec<Option<Box<[Plane; CHANNELS]>>>,
+    /// CPU time spent gathering the banner cells, choosing their shifts
+    /// included.
+    gather: Duration,
 }
 
 /// One finished column.
@@ -224,10 +237,22 @@ fn prepare_column(
     // the stream as it stands, and the stream is then replayed past that
     // cell's draws for the next one.
     let mut rng = Rng::new(ctx.seed, item.col as u64);
+    let mut shifts = ShiftSearch::new(ctx.shift_range);
+    let mut unshifted = Vec::with_capacity(cells.len());
+    let mut gather = Duration::ZERO;
     for (row, cell) in cells.iter_mut().enumerate() {
         cell.row = row;
         cell.n_layers = ctx.layers.get(row, item.col);
-        view.gather(row, item.col, &mut cell.target);
+        let t = Instant::now();
+        let shifted = shifts.gather(
+            &view,
+            row,
+            item.col,
+            &ctx.solve.patterns.top,
+            &mut cell.target,
+        );
+        gather += t.elapsed();
+        unshifted.push(shifted.map(|s| s.unshifted));
         cell.rng = rng.clone();
         perturb::skip(&mut rng, &ctx.solve, cell.n_layers);
     }
@@ -237,6 +262,8 @@ fn prepare_column(
         strip,
         resample,
         blocks_cpu,
+        unshifted,
+        gather,
     }
 }
 
@@ -245,16 +272,31 @@ fn prepare_column(
 /// The composites are rebuilt from the solutions here ([`Compositor`]), not
 /// taken from the backend, so every backend's results are painted through the
 /// same CPU compositing step.
-fn paint_column(strip: &mut [u8], cells: &[Solution], alphas: &[Plane]) {
+///
+/// A cell with an `unshifted` patch was solved against a shifted one, so the
+/// error its backend reported is against the wrong target; it is re-measured
+/// here, on the CPU for every backend, against the unshifted patch.
+fn paint_column(
+    strip: &mut [u8],
+    cells: &mut [Solution],
+    unshifted: &[Option<Box<[Plane; CHANNELS]>>],
+    alphas: &[Plane],
+) {
     let mut compositor = Compositor::default();
-    for (row, solution) in cells.iter().enumerate() {
-        paint_cell(strip, row, compositor.composite(solution, row, alphas));
+    for (row, (solution, unshifted)) in cells.iter_mut().zip(unshifted).enumerate() {
+        let composite = compositor.composite(solution, row, alphas);
+        if let Some(target) = unshifted {
+            let hw = patch_rows(row).1 * BANNER_W;
+            solution.error = target_error(composite, target, row);
+            solution.lab_error = solution.error / hw as f32;
+        }
+        paint_cell(strip, row, composite);
     }
 }
 
 /// Run the whole wall through prepare, solve and paint, one group of columns
 /// at a time, and return the finished columns left to right together with the
-/// prepare phase's resample and block-matching CPU times.
+/// prepare phase's resample, block-matching and cell-gathering CPU times.
 ///
 /// Each group is prepared in parallel over its columns, solved as one batch,
 /// then painted in parallel over its columns. Only one group's prepared cells
@@ -265,11 +307,12 @@ fn render_wall(
     ctx: &ColContext<'_>,
     items: &[ColItem],
     backend: &mut dyn Backend,
-) -> (Vec<ColOutcome>, Duration, Duration) {
+) -> (Vec<ColOutcome>, Duration, Duration, Duration) {
     let rows = ctx.layout.rows;
     let group_columns = (GROUP_CELLS / rows).max(1);
     let mut outcomes = Vec::with_capacity(items.len());
     let (mut resample, mut blocks_cpu) = (Duration::ZERO, Duration::ZERO);
+    let mut gather = Duration::ZERO;
     let mut cells = Vec::new();
 
     for group in items.chunks(group_columns) {
@@ -288,28 +331,46 @@ fn render_wall(
         for column in &prepared {
             resample += column.resample;
             blocks_cpu += column.blocks_cpu;
+            gather += column.gather;
         }
 
         // ---- solve ---------------------------------------------------------
         let solutions = backend.solve(&cells, &ctx.solve);
 
         // ---- paint ---------------------------------------------------------
+        // The unshifted patches are dropped right after painting: they are only
+        // needed for the error readout, and the wall's solutions outlive them.
         let mut solutions = solutions.into_iter();
-        let mut finished: Vec<ColOutcome> = prepared
+        let mut finished: Vec<(ColOutcome, Vec<_>)> = prepared
             .into_iter()
-            .map(|PreparedColumn { blocks, strip, .. }| ColOutcome {
-                cells: solutions.by_ref().take(rows).collect(),
-                blocks,
-                strip,
-            })
+            .map(
+                |PreparedColumn {
+                     blocks,
+                     strip,
+                     unshifted,
+                     ..
+                 }| {
+                    let outcome = ColOutcome {
+                        cells: solutions.by_ref().take(rows).collect(),
+                        blocks,
+                        strip,
+                    };
+                    (outcome, unshifted)
+                },
+            )
             .collect();
-        finished.par_iter_mut().for_each(|outcome| {
-            paint_column(&mut outcome.strip, &outcome.cells, &ctx.solve.patterns.top);
+        finished.par_iter_mut().for_each(|(outcome, unshifted)| {
+            paint_column(
+                &mut outcome.strip,
+                &mut outcome.cells,
+                unshifted,
+                &ctx.solve.patterns.top,
+            );
         });
-        outcomes.extend(finished);
+        outcomes.extend(finished.into_iter().map(|(outcome, _)| outcome));
     }
 
-    (outcomes, resample, blocks_cpu)
+    (outcomes, resample, blocks_cpu, gather)
 }
 
 /// Copy every column strip into the wall canvas.
@@ -697,6 +758,7 @@ fn run(config: &Config) {
             purity_weight: config.purity_weight,
         },
         seed: config.seed,
+        shift_range: config.shift_range,
     };
     let mut solver = match gpu {
         Some(gpu) => Solver::Gpu(Box::new(gpu.with_progress(progress.counter()))),
@@ -706,7 +768,8 @@ fn run(config: &Config) {
             progress.counter(),
         )),
     };
-    let (outcomes, cpu_resample, cpu_blocks) = render_wall(&ctx, &items, solver.backend());
+    let (outcomes, cpu_resample, cpu_blocks, cpu_gather) =
+        render_wall(&ctx, &items, solver.backend());
     let stages = solver.backend().stages();
     let t_pipeline = t.elapsed();
     progress.finish();
@@ -908,6 +971,16 @@ fn run(config: &Config) {
                 blocks.len()
             )),
         ));
+        if config.shift_range != (0, 0) {
+            timings.push((
+                "  shift",
+                cpu_gather,
+                Some(format!(
+                    "gather and shift choice, range {} {}",
+                    config.shift_range.0, config.shift_range.1
+                )),
+            ));
+        }
         timings.push((
             "  solve",
             t_solve,

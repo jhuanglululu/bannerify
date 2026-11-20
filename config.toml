@@ -85,6 +85,14 @@ feature_weight = 0.5
 # it penalises photographic shades, so expect a higher error on photographs
 purity_weight = 0
 
+# per-banner shift: [X, Y]
+# each banner may be solved against the image moved up to X pixels sideways
+# and Y pixels up or down, whichever lets a clean banner fit best; [0, 0] (the
+# default) turns it off. X can be at most 2 and Y at most 4
+# the banner is still drawn at its real position, and the reported error is
+# measured against the unmoved image, so the reported error rises
+shift_range = [0, 0]
+
 # REMOVED in phase 5: `lab_refine`.
 # The separate perceptual (OKLab) pass is gone; exact perceptual scoring now
 # happens inside refinement, on every window step, and is tuned by

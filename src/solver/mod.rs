@@ -8,6 +8,7 @@ pub mod feature;
 pub mod greedy;
 pub mod perturb;
 pub mod refine;
+pub mod shift;
 pub mod variance;
 pub mod workspace;
 
