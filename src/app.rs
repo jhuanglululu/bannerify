@@ -694,6 +694,7 @@ fn run(config: &Config) {
             refinement: &config.refinement,
             perturbations: config.perturbations,
             feature_weight: config.feature_weight,
+            purity_weight: config.purity_weight,
         },
         seed: config.seed,
     };

@@ -2,15 +2,15 @@
 //! tables followed by `kernels.wgsl`.
 //!
 //! The tables are printed from the CPU solver's own constants (the dye table,
-//! its weighted squares, the luma weights, and [`crate::oklab`]'s
-//! linearisation table and matrices), so both sides use the same numbers bit
+//! its weighted squares, the dyes in OKLab, the luma weights, and
+//! [`crate::oklab`]'s linearisation table and matrices), so both sides use the same numbers bit
 //! for bit; Rust's `{:?}` prints the shortest decimal that rounds back to the
 //! same `f32`, which the shader compiler then parses to that `f32`. The matrices
 //! are `f64` and are rounded to `f32` exactly as the CPU kernels round them.
 
 use std::fmt::Write;
 
-use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL, colors_oklab};
 use crate::geometry::TOP_HW;
 use crate::oklab::{LINEARIZE, M1, M2};
 
@@ -46,6 +46,15 @@ pub(super) fn wgsl(group: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(out, "const COLORS = array<vec3<f32>, 16>({colors});");
+    let colors_lab = colors_oklab()
+        .iter()
+        .map(|c| format!("vec3<f32>({})", wgsl_list(c.iter().copied())))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "const COLORS_LAB = array<vec3<f32>, 16>({colors_lab});"
+    );
     let _ = writeln!(
         out,
         "const WSQ = array<f32, 16>({});",

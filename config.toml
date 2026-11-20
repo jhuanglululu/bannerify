@@ -79,6 +79,12 @@ layer_range = [4, 6]
 #  gradients, so prefer 0-0.25 for photographic targets)
 feature_weight = 0.5
 
+# how strongly the solver prefers pure dye colors over mixes of them
+# every pixel is charged its distance to the nearest of the 16 dye colors,
+# times this weight; 0 (the default) turns it off
+# it penalises photographic shades, so expect a higher error on photographs
+purity_weight = 0
+
 # REMOVED in phase 5: `lab_refine`.
 # The separate perceptual (OKLab) pass is gone; exact perceptual scoring now
 # happens inside refinement, on every window step, and is tuned by

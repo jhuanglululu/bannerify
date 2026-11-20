@@ -64,6 +64,7 @@ pub(super) fn rounds(
     (top_n, duplicates, rounds): (usize, usize, usize),
     cfg: &RefinementConfig,
     lambda: f32,
+    nu: f32,
     alphas: &[Plane],
     n: usize,
     rng: &mut Rng,
@@ -93,7 +94,7 @@ pub(super) fn rounds(
         // The re-refine is the whole point — the kick alone almost never
         // improves anything.
         for trial in &mut trials {
-            refine::refine(ws, trial, cfg, lambda, alphas, n);
+            refine::refine(ws, trial, cfg, lambda, nu, alphas, n);
         }
 
         for trial in trials.drain(..) {
@@ -205,6 +206,7 @@ mod tests {
                     refinement: &refinement,
                     perturbations,
                     feature_weight: 0.0,
+                    purity_weight: 0.0,
                 };
                 let mut ws = Workspace::new(5, refinement.refinement_candidate);
                 ws.begin(row);

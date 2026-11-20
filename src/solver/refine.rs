@@ -86,12 +86,22 @@
 //! reports is re-measured against the pure target ([`lab_error`]) so quality
 //! numbers stay comparable across λ.
 //!
+//! ## The purity term
+//!
+//! With `--purity-weight ν` above zero, rung 2 also adds `ν · Σ ΔE(composite
+//! pixel, nearest dye)`, nearest by exact OKLab distance over the 16 dyes
+//! ([`crate::color::colors_oklab`]). It does not look at the target: every
+//! pixel that is a mix of two dyes is charged, so of two candidates with similar
+//! target error the one drawn in cleaner dye colours ranks first. Rung 1 and
+//! the closed-form base re-optimisation do not see it, and like the feature
+//! term it is left out of the reported error.
+//!
 //! The base dye is re-optimised at the end of every pass from `suffixes[0]`
 //! (with `α ≡ 1`), and the whole prefix chain is then rebuilt, so `prefixes[n]`
 //! is the composite the reported error is measured on.
 
 use crate::cli::config::RefinementConfig;
-use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL};
+use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL, colors_oklab};
 use crate::oklab::srgb_to_oklab;
 use crate::simd::F32s;
 use crate::zip;
@@ -122,6 +132,8 @@ struct Ctx<'a> {
     lab_feature: &'a [Plane; 3],
     /// Weight of the feature term in the ranking error; `0` disables it.
     lambda: f32,
+    /// Weight of the purity term in the ranking error; `0` disables it.
+    nu: f32,
     /// The pattern table.
     alphas: &'a [Plane],
     /// Beam width, window length, pruning threshold, pass count, exact top-N.
@@ -158,6 +170,7 @@ pub(super) fn refine(
     solution: &mut Solution,
     cfg: &RefinementConfig,
     lambda: f32,
+    nu: f32,
     alphas: &[Plane],
     n: usize,
 ) {
@@ -181,6 +194,7 @@ pub(super) fn refine(
         lab_target,
         lab_feature,
         lambda,
+        nu,
         alphas,
         cfg,
     };
@@ -223,7 +237,7 @@ pub(super) fn refine(
         }
     }
 
-    solution.error = ranking_error(&prefixes[n], lab_target, lab_feature, lambda, off);
+    solution.error = ranking_error(&prefixes[n], lab_target, lab_feature, lambda, nu, off);
 }
 
 /// Re-choose up to `window_size` layers ending at `start_layer`, as a beam.
@@ -328,7 +342,14 @@ fn refine_window(
             push_top(
                 best,
                 (
-                    ranking_error(cand, ctx.lab_target, ctx.lab_feature, ctx.lambda, off),
+                    ranking_error(
+                        cand,
+                        ctx.lab_target,
+                        ctx.lab_feature,
+                        ctx.lambda,
+                        ctx.nu,
+                        off,
+                    ),
                     cand_idx,
                     p_idx,
                     c_idx,
@@ -519,27 +540,32 @@ pub(crate) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usi
 }
 
 /// The number the beam actually ranks on: `Σ ΔE(composite, target)` plus
-/// `λ · Σ ΔE(composite, feature)`.
+/// `λ · Σ ΔE(composite, feature)` plus `ν · Σ ΔE(composite, nearest dye)`.
 ///
-/// One pass, not two calls to [`lab_error`]: the composite's OKLab conversion is
-/// the expensive part (a cube root per channel per lane) and both terms need the
-/// same one. Nine lane streams is past [`zip!`](crate::zip)'s arity, hence the
-/// indexed loop.
+/// One pass, not several calls to [`lab_error`]: the composite's OKLab
+/// conversion is the expensive part (a cube root per channel per lane) and every
+/// term needs the same one. Nine lane streams is past [`zip!`](crate::zip)'s
+/// arity, hence the indexed loop.
 ///
-/// `λ = 0` returns [`lab_error`] itself, so a run without the feature map ranks
-/// on bit-identical numbers to one built before it existed.
+/// `λ = ν = 0` returns [`lab_error`] itself, so a run without either term ranks
+/// on bit-identical numbers to one built before they existed; `ν = 0` adds
+/// nothing to the feature term's arithmetic either.
 pub(super) fn ranking_error(
     rgb: &[Plane; 3],
     lab_target: &[Plane; 3],
     lab_feature: &[Plane; 3],
     lambda: f32,
+    nu: f32,
     off: usize,
 ) -> f32 {
-    if lambda == 0.0 {
+    if lambda == 0.0 && nu == 0.0 {
         return lab_error(rgb, lab_target, off);
     }
 
     let lam = F32s::splat(lambda);
+    let nu_s = F32s::splat(nu);
+    let dyes: [(F32s, F32s, F32s); NUM_COLORS] =
+        colors_oklab().map(|[l, a, b]| (F32s::splat(l), F32s::splat(a), F32s::splat(b)));
     let rgb = [view(&rgb[0], off), view(&rgb[1], off), view(&rgb[2], off)];
     let tar: [&[F32s]; 3] = std::array::from_fn(|ch| view(&lab_target[ch], off));
     let fea: [&[F32s]; 3] = std::array::from_fn(|ch| view(&lab_feature[ch], off));
@@ -547,18 +573,42 @@ pub(super) fn ranking_error(
     let mut acc = F32s::ZERO;
     for i in 0..rgb[0].len() {
         let lab = srgb_to_oklab(rgb[0][i], rgb[1][i], rgb[2][i]);
-        let target = delta_e(lab, (tar[0][i], tar[1][i], tar[2][i]));
-        let feature = delta_e(lab, (fea[0][i], fea[1][i], fea[2][i]));
-        acc += feature.mul_add(lam, target);
+        let mut err = delta_e(lab, (tar[0][i], tar[1][i], tar[2][i]));
+        if lambda != 0.0 {
+            let feature = delta_e(lab, (fea[0][i], fea[1][i], fea[2][i]));
+            err = feature.mul_add(lam, err);
+        }
+        if nu != 0.0 {
+            err = purity(lab, &dyes).mul_add(nu_s, err);
+        }
+        acc += err;
     }
     acc.hsum()
+}
+
+/// `ΔE²` between two OKLab lanes, in the form [`delta_e`] takes the root of.
+#[inline]
+fn delta_e2(a: (F32s, F32s, F32s), b: (F32s, F32s, F32s)) -> F32s {
+    let (dl, da, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    dl.mul_add(dl, da.mul_add(da, db * db))
 }
 
 /// Euclidean distance between two OKLab lanes — a ΔE.
 #[inline]
 fn delta_e(a: (F32s, F32s, F32s), b: (F32s, F32s, F32s)) -> F32s {
-    let (dl, da, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
-    dl.mul_add(dl, da.mul_add(da, db * db)).sqrt()
+    delta_e2(a, b).sqrt()
+}
+
+/// ΔE from an OKLab lane to its nearest dye: the smallest `ΔE²` over the 16
+/// dyes, then one square root. Zero for a pixel painted in a single dye.
+#[inline]
+fn purity(lab: (F32s, F32s, F32s), dyes: &[(F32s, F32s, F32s); NUM_COLORS]) -> F32s {
+    dyes[1..]
+        .iter()
+        .fold(delta_e2(lab, dyes[0]), |min, &dye| {
+            min.min(delta_e2(lab, dye))
+        })
+        .sqrt()
 }
 
 /// `Σ ΔE` between an sRGB composite and the OKLab target planes — the **pure
@@ -624,7 +674,14 @@ fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &m
                     *o = c.mul_add(mul, add);
                 }
             }
-            let err = ranking_error(out, ctx.lab_target, ctx.lab_feature, ctx.lambda, off);
+            let err = ranking_error(
+                out,
+                ctx.lab_target,
+                ctx.lab_feature,
+                ctx.lambda,
+                ctx.nu,
+                off,
+            );
             if err < min_err {
                 min_err = err;
                 best = c_idx;

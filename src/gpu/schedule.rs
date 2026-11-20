@@ -27,6 +27,7 @@ pub(super) fn base_params(
     shape: &Shape,
     cfg: &RefinementConfig,
     lambda: f32,
+    nu: f32,
     n_slots: usize,
     nl: usize,
 ) -> Params {
@@ -38,6 +39,7 @@ pub(super) fn base_params(
         n_exact: shape.n_exact as u32,
         window: shape.window as u32,
         lambda,
+        nu,
         threshold: cfg.error_threshold,
         ..Params::default()
     }

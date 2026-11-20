@@ -111,6 +111,21 @@ pub const SNAP_ENTRIES: usize = SNAP_LEVELS * SNAP_LEVELS * SNAP_LEVELS;
 
 static SNAP_LUT: OnceLock<Box<[u8; SNAP_ENTRIES]>> = OnceLock::new();
 
+static COLORS_OKLAB: OnceLock<[[f32; 3]; NUM_COLORS]> = OnceLock::new();
+
+/// The dyes in OKLab, `[L, a, b]`, converted by [`srgb_to_oklab`] once per
+/// process. The snap LUT's nearest-dye search and the exact rung's purity term
+/// both measure against these, and the GPU kernels are given the same numbers.
+pub fn colors_oklab() -> &'static [[f32; 3]; NUM_COLORS] {
+    COLORS_OKLAB.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let c = COLORS_F32[i];
+            let (l, a, b) = srgb_to_oklab(F32s::splat(c[0]), F32s::splat(c[1]), F32s::splat(c[2]));
+            [l.to_array()[0], a.to_array()[0], b.to_array()[0]]
+        })
+    })
+}
+
 /// Quantised sRGB → index of the nearest dye in OKLab.
 ///
 /// Built once per process, on first use. Nearest is Euclidean distance in OKLab,
@@ -147,11 +162,7 @@ const fn dequantize(q: usize) -> f32 {
 }
 
 fn build_snap_lut() -> Box<[u8; SNAP_ENTRIES]> {
-    let dyes: [[f32; 3]; NUM_COLORS] = std::array::from_fn(|i| {
-        let c = COLORS_F32[i];
-        let (l, a, b) = srgb_to_oklab(F32s::splat(c[0]), F32s::splat(c[1]), F32s::splat(c[2]));
-        [l.to_array()[0], a.to_array()[0], b.to_array()[0]]
-    });
+    let dyes = colors_oklab();
 
     // A `Box<[u8; N]>` built through a Vec: `Box::new([0; N])` would build the
     // 32 KiB array on the stack first.

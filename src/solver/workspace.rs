@@ -62,9 +62,10 @@ pub struct Solution {
     /// ([`super::refine::lab_error`] explains why it is not squared).
     ///
     /// Always the **pure target** error as it leaves [`Workspace::solve`], even
-    /// when the solver ranked on a feature-regularised one
+    /// when the solver ranked on one with the feature or purity term added
     /// ([`super::refine::ranking_error`]): the readout has to mean the same
-    /// thing at every `--feature-weight` for the numbers to be comparable.
+    /// thing at every `--feature-weight` and `--purity-weight` for the numbers
+    /// to be comparable.
     /// Inside the solve it carries whichever error that stage ranks on.
     pub error: f32,
     /// [`Solution::error`] per pixel — the number that reads directly as a
@@ -170,6 +171,9 @@ pub struct SolveCfg<'a> {
     /// Weight of the feature-map term, `--feature-weight`; `0` skips the whole
     /// pass ([`super::feature`]).
     pub feature_weight: f32,
+    /// Weight of the purity term in the exact rung's ranking error,
+    /// `--purity-weight`; `0` leaves it out ([`super::refine`]).
+    pub purity_weight: f32,
 }
 
 /// Reusable solver buffers for one worker.
@@ -320,6 +324,7 @@ impl Workspace {
                 &mut solution,
                 cfg.refinement,
                 cfg.feature_weight,
+                cfg.purity_weight,
                 alphas,
                 n_layers,
             );
@@ -334,6 +339,7 @@ impl Workspace {
                 (top_n, duplicates, rounds),
                 cfg.refinement,
                 cfg.feature_weight,
+                cfg.purity_weight,
                 alphas,
                 n_layers,
                 rng,
@@ -392,6 +398,7 @@ mod tests {
             refinement,
             perturbations: Some((2, 2, 1)),
             feature_weight: 0.0,
+            purity_weight: 0.0,
         }
     }
 
@@ -456,12 +463,21 @@ mod tests {
                 ws.off,
                 ws.hw,
             );
-            refine::refine(ws, &mut solution, &refinement, 0.0, &patterns.top, LAYERS);
+            refine::refine(
+                ws,
+                &mut solution,
+                &refinement,
+                0.0,
+                0.0,
+                &patterns.top,
+                LAYERS,
+            );
             perturb::rounds(
                 ws,
                 &mut solution,
                 (2, 2, 1),
                 &refinement,
+                0.0,
                 0.0,
                 &patterns.top,
                 LAYERS,
@@ -484,16 +500,18 @@ mod tests {
         }
     }
 
-    /// The reported error stays comparable across feature weights: whatever the
-    /// solver ranked on, what comes back is `Σ ΔE` of the final composite
-    /// against the *pure* target — recomputed here pixel by pixel, from the
-    /// patch as it was handed in, without touching the solver's kernels.
+    /// The reported error stays comparable across feature and purity weights:
+    /// whatever the solver ranked on, what comes back is `Σ ΔE` of the final
+    /// composite against the *pure* target — recomputed here pixel by pixel,
+    /// from the patch as it was handed in, without touching the solver's
+    /// kernels.
     #[test]
     fn the_reported_error_is_pure_target_delta_e_at_a_non_zero_weight() {
         let patterns = load(&HashSet::new());
         let refinement = refinement();
         let cfg = SolveCfg {
             feature_weight: 0.75,
+            purity_weight: 0.5,
             ..config(&patterns, &refinement)
         };
 

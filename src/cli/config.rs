@@ -24,6 +24,8 @@ const DEFAULT_EXACT_CANDIDATES: usize = 20;
 /// step 6 has been run.
 const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
+const DEFAULT_PURITY_WEIGHT: f32 = 0.0;
+
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 
 /// Default GPU memory budget, in MiB: the GPU backend's own default.
@@ -51,6 +53,9 @@ pub struct Config {
     /// Weight of the feature-map term in the solver's error, `0` to disable it
     /// entirely ([`crate::solver::feature`]).
     pub feature_weight: f32,
+    /// Weight of the purity term in the exact rung's ranking error, `0` to
+    /// disable it ([`crate::solver::refine`]).
+    pub purity_weight: f32,
     /// `(top_n, duplicates, rounds)` perturbation search, or `None` when off.
     pub perturbations: Option<(usize, usize, usize)>,
     pub seed: u64,
@@ -92,6 +97,7 @@ pub struct ConfigToml {
     pub refinement_candidate: Option<usize>,
     pub exact_candidates: Option<usize>,
     pub feature_weight: Option<f32>,
+    pub purity_weight: Option<f32>,
     pub perturbations: Option<Vec<usize>>,
     pub seed: Option<u64>,
     pub preview: Option<usize>,
@@ -144,6 +150,12 @@ impl From<Args> for Config {
             "--feature-weight",
             config.feature_weight,
             "feature_weight",
+        ));
+        let purity_weight = c.purity_weight(pick(
+            args.purity_weight,
+            "--purity-weight",
+            config.purity_weight,
+            "purity_weight",
         ));
         let perturbations = c.perturbations(&args.perturbations, config.perturbations);
         let refinement = RefinementConfig {
@@ -252,6 +264,7 @@ impl From<Args> for Config {
             n_layers: n_layers.unwrap_or(DEFAULT_LAYERS),
             refinement,
             feature_weight,
+            purity_weight,
             perturbations,
             seed: seed.map_or(0, |(s, _)| s),
             backend,
@@ -292,6 +305,7 @@ impl Config {
             "refinement_candidate": self.refinement.refinement_candidate,
             "exact_candidates": self.refinement.exact_candidates,
             "feature_weight": shortest(self.feature_weight),
+            "purity_weight": shortest(self.purity_weight),
             "perturbations": self.perturbations.map(|(t, d, r)| [t, d, r]),
             "seed": self.seed,
             "workers": workers,
@@ -567,6 +581,18 @@ impl Checker {
     fn feature_weight(&mut self, value: Option<(f32, Origin)>) -> f32 {
         let Some((weight, origin)) = value else {
             return DEFAULT_FEATURE_WEIGHT;
+        };
+        if !weight.is_finite() || weight < 0.0 {
+            self.invalid(origin, weight, "a finite number of at least 0.0");
+        }
+        weight
+    }
+
+    /// Like the feature weight, a ratio with no natural cap: only negative and
+    /// non-finite values are refused.
+    fn purity_weight(&mut self, value: Option<(f32, Origin)>) -> f32 {
+        let Some((weight, origin)) = value else {
+            return DEFAULT_PURITY_WEIGHT;
         };
         if !weight.is_finite() || weight < 0.0 {
             self.invalid(origin, weight, "a finite number of at least 0.0");

@@ -458,7 +458,14 @@ impl GpuBackend {
         }
 
         let shape = buffers.shape;
-        let p = schedule::base_params(&shape, cfg.refinement, cfg.feature_weight, n, nl);
+        let p = schedule::base_params(
+            &shape,
+            cfg.refinement,
+            cfg.feature_weight,
+            cfg.purity_weight,
+            n,
+            nl,
+        );
         let bound = buffers.bindings();
 
         if greedy {

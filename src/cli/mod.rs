@@ -190,6 +190,14 @@ pub struct Args {
     #[arg(short = 'F', long, value_name = "WEIGHT")]
     pub feature_weight: Option<f32>,
 
+    /// Weight of the purity term: [default: 0, off]. Every pixel is charged its
+    /// distance to the nearest pure dye color, times this weight, so the
+    /// solver prefers banners drawn in clean dye colors over mixes that
+    /// average to the right shade. Penalises photographic shades; 0 disables it
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'U', long, value_name = "WEIGHT")]
+    pub purity_weight: Option<f32>,
+
     /// Refinement pass count: [default: 2]; 0 stops after the greedy fill
     #[arg(help_heading = "Refinement")]
     #[arg(short = 'R', long, value_names = ["COUNT"])]

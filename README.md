@@ -146,6 +146,11 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   by an idealised two-layer banner in pure dye colors, and λ weighs that
   fit against the raw pixels. Raise it when logos and flat areas come out
   muddy, lower it (or `0`) for photographs.
+- `-U, --purity-weight ν` — how strongly the solver prefers pure dye
+  colors over mixes of them (default `0`, off). Every pixel is charged its
+  distance to the nearest of the 16 dye colors, times ν, so a banner drawn
+  in clean dye colors beats one whose blends average to the right shade.
+  It penalises photographic shades, so expect a higher error on photographs.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds
   and keep the best result.
 - `-L, --layer-range MIN MAX` — how many pattern layers a banner may use

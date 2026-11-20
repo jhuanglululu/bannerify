@@ -3,7 +3,8 @@
 // they run in).
 //
 // The host prepends a prelude with the workgroup size `GROUP` and the constant
-// tables (`PL`, `NC`, `COLORS`, `WSQ`, `W0..W2`, `LIN`, `M1_*`, `M2_*`),
+// tables (`PL`, `NC`, `COLORS`, `COLORS_LAB`, `WSQ`, `W0..W2`, `LIN`, `M1_*`,
+// `M2_*`),
 // generated from the same Rust constants the CPU solver uses.
 //
 // Every per-pixel expression is the CPU kernel's, with `fma` where the CPU
@@ -42,8 +43,8 @@ struct Params {
     row: u32,        // threads per dispatch row: thread id = x + y * row
     lambda: f32,     // feature weight
     threshold: f32,  // `error_threshold`
-    pad1: f32,
-    pad2: f32,
+    nu: f32,         // purity weight
+    pad: f32,
 }
 
 struct Slot {
@@ -184,18 +185,47 @@ fn delta_e(a: Lab, l: vec4<f32>, aa: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return sqrt(fma(dl, dl, fma(da, da, db * db)));
 }
 
-/// One lane step of the ranking error (`lambda > 0`) or the pure-target error
-/// (`lambda == 0`) for sRGB pixels `(r, g, b)` at plane position `j` of `cell`.
-fn ranking_term(cell: u32, j: u32, lambda: f32, r: vec4<f32>, g: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+/// `ΔE²` between OKLab pixels and one dye.
+fn dye_e2(a: Lab, d: vec3<f32>) -> vec4<f32> {
+    let dl = a.l - d.x;
+    let da = a.a - d.y;
+    let db = a.b - d.z;
+    return fma(dl, dl, fma(da, da, db * db));
+}
+
+/// `refine::purity`: ΔE from OKLab pixels to their nearest dye, the smallest
+/// `ΔE²` over the 16 dyes, then one square root.
+fn purity(lab: Lab) -> vec4<f32> {
+    var d2 = dye_e2(lab, COLORS_LAB[0]);
+    for (var c = 1u; c < NC; c++) {
+        d2 = min(d2, dye_e2(lab, COLORS_LAB[c]));
+    }
+    return sqrt(d2);
+}
+
+/// The target ΔE `tde` of OKLab pixels `lab` at plane position `j` of `cell`,
+/// plus the feature term (`lambda > 0`) and the purity term (`nu > 0`).
+fn with_terms(cell: u32, j: u32, lambda: f32, nu: f32, lab: Lab, tde: vec4<f32>) -> vec4<f32> {
+    var err = tde;
+    if (lambda != 0.0) {
+        let feature = delta_e(lab, cells[cell_at(cell, 6u) + j], cells[cell_at(cell, 7u) + j],
+                              cells[cell_at(cell, 8u) + j]);
+        err = fma(feature, vec4<f32>(lambda), err);
+    }
+    if (nu != 0.0) {
+        err = fma(purity(lab), vec4<f32>(nu), err);
+    }
+    return err;
+}
+
+/// One lane step of the ranking error (`lambda > 0` or `nu > 0`) or the
+/// pure-target error (both `0`) for sRGB pixels `(r, g, b)` at plane position
+/// `j` of `cell`.
+fn ranking_term(cell: u32, j: u32, lambda: f32, nu: f32, r: vec4<f32>, g: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     let lab = oklab(r, g, b);
     let tde = delta_e(lab, cells[cell_at(cell, 3u) + j], cells[cell_at(cell, 4u) + j],
                       cells[cell_at(cell, 5u) + j]);
-    if (lambda == 0.0) {
-        return tde;
-    }
-    let feature = delta_e(lab, cells[cell_at(cell, 6u) + j], cells[cell_at(cell, 7u) + j],
-                          cells[cell_at(cell, 8u) + j]);
-    return fma(feature, vec4<f32>(lambda), tde);
+    return with_terms(cell, j, lambda, nu, lab, tde);
 }
 
 /// The closed-form dye sweep shared by every rung-1 kernel.
@@ -540,7 +570,7 @@ fn rung2(@builtin(global_invocation_id) gid: vec3<u32>) {
         let r = fma(fma(prefixes[pr + j], om, c0 * alp), mul, sfx_src[sf + PL + j]);
         let g = fma(fma(prefixes[pr + PL + j], om, c1 * alp), mul, sfx_src[sf + 2u * PL + j]);
         let b = fma(fma(prefixes[pr + 2u * PL + j], om, c2 * alp), mul, sfx_src[sf + 3u * PL + j]);
-        acc = acc + ranking_term(s.cell, j, P.lambda, r, g, b);
+        acc = acc + ranking_term(s.cell, j, P.lambda, P.nu, r, g, b);
     }
     r2[id] = hsum(acc);
 }
@@ -684,7 +714,7 @@ fn reopt_exact(@builtin(global_invocation_id) gid: vec3<u32>) {
         let r = fma(c0, mul, suffixes[at + PL + j]);
         let g = fma(c1, mul, suffixes[at + 2u * PL + j]);
         let b = fma(c2, mul, suffixes[at + 3u * PL + j]);
-        acc = acc + ranking_term(s.cell, j, P.lambda, r, g, b);
+        acc = acc + ranking_term(s.cell, j, P.lambda, P.nu, r, g, b);
     }
     reopt[id] = hsum(acc);
 }
@@ -762,14 +792,12 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
         let tde = delta_e(lab, cells[cell_at(s.cell, 3u) + j], cells[cell_at(s.cell, 4u) + j],
                           cells[cell_at(s.cell, 5u) + j]);
         pure = pure + tde;
-        if (P.lambda != 0.0) {
-            let feature = delta_e(lab, cells[cell_at(s.cell, 6u) + j],
-                                  cells[cell_at(s.cell, 7u) + j], cells[cell_at(s.cell, 8u) + j]);
-            rank = rank + fma(feature, vec4<f32>(P.lambda), tde);
+        if (P.lambda != 0.0 || P.nu != 0.0) {
+            rank = rank + with_terms(s.cell, j, P.lambda, P.nu, lab, tde);
         }
     }
     sols[id].lab_err = hsum(pure);
-    if (P.lambda != 0.0) {
+    if (P.lambda != 0.0 || P.nu != 0.0) {
         sols[id].rank_err = hsum(rank);
     } else {
         sols[id].rank_err = hsum(pure);
