@@ -463,6 +463,7 @@ impl GpuBackend {
             cfg.refinement,
             cfg.feature_weight,
             cfg.purity_weight,
+            cfg.gradient_weight,
             n,
             nl,
         );

@@ -96,19 +96,42 @@
 //! the closed-form base re-optimisation do not see it, and like the feature
 //! term it is left out of the reported error.
 //!
+//! ## The gradient term
+//!
+//! With `--gradient-weight μ` above zero, rung 2 also adds
+//! `μ · Σ ‖(c_a − c_b) − (t_a − t_b)‖` over every horizontally and every
+//! vertically adjacent pixel pair `(a, b)` of the solved view, `c` the
+//! composite and `t` the pure target, both in OKLab. It charges every step
+//! between neighbouring pixels that the target does not take, and every step
+//! the target takes that the composite does not, so an edge one pixel off is
+//! charged twice; `--shift-range` lets the target meet the pattern edge.
+//!
+//! The norm is the same for `(c_a − t_a) − (c_b − t_b)`, so the term needs no
+//! target steps: [`ranking_error`] writes each pixel's residual `c − t` to
+//! [`Workspace::lab_residual`] as it measures the target ΔE, and
+//! [`gradient`] differences each residual lane against the lane one pixel to
+//! the right and the lane one pixel row down. A pair-mask plane per direction
+//! zeroes the pairs that leave the patch: the last pixel of a row with the
+//! first of the next, and the last row with the padding past the plane. Pairs
+//! start at the first pixel of the view and only reach right and down, so a
+//! lower banner row never reads the hidden head of its planes.
+//!
 //! The base dye is re-optimised at the end of every pass from `suffixes[0]`
 //! (with `α ≡ 1`), and the whole prefix chain is then rebuilt, so `prefixes[n]`
 //! is the composite the reported error is measured on.
 
 use crate::cli::config::RefinementConfig;
+use std::sync::OnceLock;
+
 use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL, colors_oklab};
+use crate::geometry::{BANNER_W, TOP_HW};
 use crate::oklab::srgb_to_oklab;
-use crate::simd::F32s;
+use crate::simd::{Chunk, F32s, LANES};
 use crate::zip;
 
 use super::greedy::build_prefix;
 use super::workspace::{
-    Beam, Plane, Solution, Suffix, Workspace, rebuild_prefixes, view, view_mut,
+    Beam, PaddedPlane, Plane, Solution, Suffix, Workspace, rebuild_prefixes, view, view_mut,
 };
 
 /// A scored candidate: `(error, beam candidate, pattern, dye)`.
@@ -134,6 +157,8 @@ struct Ctx<'a> {
     lambda: f32,
     /// Weight of the purity term in the ranking error; `0` disables it.
     nu: f32,
+    /// Weight of the gradient term in the ranking error; `0` disables it.
+    mu: f32,
     /// The pattern table.
     alphas: &'a [Plane],
     /// Beam width, window length, pruning threshold, pass count, exact top-N.
@@ -165,12 +190,14 @@ fn push_top(list: &mut [Scored], entry: Scored) {
 ///
 /// The prefix chain is rebuilt from `solution` first, so this works equally on
 /// the greedy fill's output and on a perturbed copy of it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn refine(
     ws: &mut Workspace,
     solution: &mut Solution,
     cfg: &RefinementConfig,
     lambda: f32,
     nu: f32,
+    mu: f32,
     alphas: &[Plane],
     n: usize,
 ) {
@@ -179,6 +206,7 @@ pub(super) fn refine(
         target,
         lab_target,
         lab_feature,
+        lab_residual,
         prefixes,
         suffixes,
         beam,
@@ -195,6 +223,7 @@ pub(super) fn refine(
         lab_feature,
         lambda,
         nu,
+        mu,
         alphas,
         cfg,
     };
@@ -221,6 +250,7 @@ pub(super) fn refine(
                 suffixes,
                 beam,
                 cand,
+                lab_residual,
                 shortlist,
                 &mut solution.layers,
                 start,
@@ -229,7 +259,7 @@ pub(super) fn refine(
 
         // `suffixes[0]` now maps a base colour through the whole layer stack,
         // so choosing the base is the same problem with `α ≡ 1`.
-        reopt_base(&ctx, &suffixes[0], cand, solution);
+        reopt_base(&ctx, &suffixes[0], cand, lab_residual, solution);
         rebuild_prefixes(prefixes, off, solution, alphas, n);
 
         if solution.base == previous_base && solution.layers == *scratch {
@@ -237,7 +267,16 @@ pub(super) fn refine(
         }
     }
 
-    solution.error = ranking_error(&prefixes[n], lab_target, lab_feature, lambda, nu, off);
+    solution.error = ranking_error(
+        &prefixes[n],
+        lab_target,
+        lab_feature,
+        lambda,
+        nu,
+        mu,
+        lab_residual,
+        off,
+    );
 }
 
 /// Re-choose up to `window_size` layers ending at `start_layer`, as a beam.
@@ -248,6 +287,7 @@ fn refine_window(
     suffixes: &mut [Suffix],
     beam: &mut Beam,
     cand: &mut [Plane; 3],
+    residual: &mut [PaddedPlane; 3],
     shortlist: &mut [Scored],
     layers: &mut [(usize, usize)],
     start_layer: usize,
@@ -348,6 +388,8 @@ fn refine_window(
                         ctx.lab_feature,
                         ctx.lambda,
                         ctx.nu,
+                        ctx.mu,
+                        residual,
                         off,
                     ),
                     cand_idx,
@@ -540,25 +582,31 @@ pub(crate) fn convert_target(target: &[Plane; 3], out: &mut [Plane; 3], off: usi
 }
 
 /// The number the beam actually ranks on: `Σ ΔE(composite, target)` plus
-/// `λ · Σ ΔE(composite, feature)` plus `ν · Σ ΔE(composite, nearest dye)`.
+/// `λ · Σ ΔE(composite, feature)` plus `ν · Σ ΔE(composite, nearest dye)` plus
+/// `μ` times the [`gradient`] term.
 ///
 /// One pass, not several calls to [`lab_error`]: the composite's OKLab
 /// conversion is the expensive part (a cube root per channel per lane) and every
 /// term needs the same one. Nine lane streams is past [`zip!`](crate::zip)'s
-/// arity, hence the indexed loop.
+/// arity, hence the indexed loop. The gradient term needs every pixel's
+/// neighbours, so that pass writes the residuals to `residual` and the pairs are
+/// summed after it.
 ///
-/// `λ = ν = 0` returns [`lab_error`] itself, so a run without either term ranks
-/// on bit-identical numbers to one built before they existed; `ν = 0` adds
-/// nothing to the feature term's arithmetic either.
+/// `λ = ν = μ = 0` returns [`lab_error`] itself, so a run without any of the
+/// terms ranks on bit-identical numbers to one built before they existed; a
+/// zero weight adds nothing to the other terms' arithmetic either.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ranking_error(
     rgb: &[Plane; 3],
     lab_target: &[Plane; 3],
     lab_feature: &[Plane; 3],
     lambda: f32,
     nu: f32,
+    mu: f32,
+    residual: &mut [PaddedPlane; 3],
     off: usize,
 ) -> f32 {
-    if lambda == 0.0 && nu == 0.0 {
+    if lambda == 0.0 && nu == 0.0 && mu == 0.0 {
         return lab_error(rgb, lab_target, off);
     }
 
@@ -573,7 +621,8 @@ pub(super) fn ranking_error(
     let mut acc = F32s::ZERO;
     for i in 0..rgb[0].len() {
         let lab = srgb_to_oklab(rgb[0][i], rgb[1][i], rgb[2][i]);
-        let mut err = delta_e(lab, (tar[0][i], tar[1][i], tar[2][i]));
+        let t = (tar[0][i], tar[1][i], tar[2][i]);
+        let mut err = delta_e(lab, t);
         if lambda != 0.0 {
             let feature = delta_e(lab, (fea[0][i], fea[1][i], fea[2][i]));
             err = feature.mul_add(lam, err);
@@ -581,9 +630,65 @@ pub(super) fn ranking_error(
         if nu != 0.0 {
             err = purity(lab, &dyes).mul_add(nu_s, err);
         }
+        if mu != 0.0 {
+            residual[0].lanes_mut()[off + i] = lab.0 - t.0;
+            residual[1].lanes_mut()[off + i] = lab.1 - t.1;
+            residual[2].lanes_mut()[off + i] = lab.2 - t.2;
+        }
         acc += err;
     }
+    if mu != 0.0 {
+        acc = gradient(residual, off).mul_add(F32s::splat(mu), acc);
+    }
     acc.hsum()
+}
+
+/// The gradient term before its weight, per lane: `Σ ‖d_a − d_b‖` over every
+/// pixel pair `(a, b)` with `b` the right or lower neighbour of `a`, inside
+/// the view starting at lane `off`, for OKLab residuals `d` (composite minus
+/// target). Equal to `Σ ‖(c_a − c_b) − (t_a − t_b)‖`.
+///
+/// `a` is an aligned lane; its neighbours are the unaligned lanes one pixel
+/// and one pixel row further on, which is why `residual` is padded. A pair is
+/// weighed by [`pair_masks`], which is zero where `b` is not `a`'s neighbour
+/// inside the patch.
+fn gradient(residual: &[PaddedPlane; 3], off: usize) -> F32s {
+    let [right_mask, below_mask] = pair_masks();
+    let [l, a, b] = residual;
+    let at = |plane: &PaddedPlane, px: usize| {
+        F32s::from_array(plane[px..px + LANES].try_into().expect("one lane"))
+    };
+    let mut acc = F32s::ZERO;
+    for k in off..TOP_HW / LANES {
+        let px = k * LANES;
+        let here = (l.lanes()[k], a.lanes()[k], b.lanes()[k]);
+        let right = (at(l, px + 1), at(a, px + 1), at(b, px + 1));
+        let below = (
+            at(l, px + BANNER_W),
+            at(a, px + BANNER_W),
+            at(b, px + BANNER_W),
+        );
+        acc = delta_e(here, right).mul_add(right_mask.lanes()[k], acc);
+        acc = delta_e(here, below).mul_add(below_mask.lanes()[k], acc);
+    }
+    acc
+}
+
+/// `[right, below]`: per pixel, `1` where the pixel has a neighbour in that
+/// direction inside a full patch and `0` where it does not (the last column
+/// for `right`, the last row for `below`). The same for every banner row,
+/// since a lower row's view ends where a top row's does.
+fn pair_masks() -> &'static [Plane; 2] {
+    static MASKS: OnceLock<[Plane; 2]> = OnceLock::new();
+    MASKS.get_or_init(|| {
+        let mut right = Chunk::zeroed();
+        let mut below = Chunk::zeroed();
+        for px in 0..TOP_HW {
+            right[px] = f32::from(u8::from(px % BANNER_W != BANNER_W - 1));
+            below[px] = f32::from(u8::from(px + BANNER_W < TOP_HW));
+        }
+        [right, below]
+    })
 }
 
 /// `ΔE²` between two OKLab lanes, in the form [`delta_e`] takes the root of.
@@ -657,7 +762,13 @@ pub(super) fn empty_suffix(suffix: &mut Suffix, off: usize) {
 /// exact rung on, all 16 are simply scored exactly, the same ranking the window
 /// steps use. `suffixes[0]` maps a flat fill through every layer, so a base dye
 /// `c` paints `c·mul + add` and building each candidate is one `O(HW)` pass.
-fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &mut Solution) {
+fn reopt_base(
+    ctx: &Ctx<'_>,
+    suffix: &Suffix,
+    out: &mut [Plane; 3],
+    residual: &mut [PaddedPlane; 3],
+    solution: &mut Solution,
+) {
     let off = ctx.off;
 
     if ctx.cfg.exact_candidates > 0 {
@@ -680,6 +791,8 @@ fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &m
                 ctx.lab_feature,
                 ctx.lambda,
                 ctx.nu,
+                ctx.mu,
+                residual,
                 off,
             );
             if err < min_err {
@@ -734,4 +847,113 @@ fn reopt_base(ctx: &Ctx<'_>, suffix: &Suffix, out: &mut [Plane; 3], solution: &m
         }
     }
     solution.base = best;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{BANNER_H, HIDDEN_H};
+    use crate::solver::workspace::lane_offset;
+
+    /// A composite and a target that both change along `x`, so the residual at
+    /// the end of a pixel row is far from the one at the start of the next.
+    /// Pixels above row `head` get unrelated colours: a pair that reaches into
+    /// a lower row's hidden head picks up a large step.
+    fn planes(head: usize) -> ([Plane; 3], [Plane; 3]) {
+        let mut rgb = [Chunk::zeroed(); 3];
+        let mut target = [Chunk::zeroed(); 3];
+        for i in 0..TOP_HW {
+            let (x, y) = ((i % BANNER_W) as f32, (i / BANNER_W) as f32);
+            let (c, t) = if i / BANNER_W < head {
+                ([250.0, 10.0, 240.0], [5.0, 230.0, 20.0])
+            } else {
+                (
+                    [
+                        10.0 * x + 5.0 * y,
+                        200.0 - 7.0 * x,
+                        30.0 + 3.0 * y + (x % 3.0) * 20.0,
+                    ],
+                    [
+                        if x < 9.0 { 100.0 + 3.0 * y } else { 220.0 },
+                        50.0 + 8.0 * x,
+                        120.0 - 2.0 * y,
+                    ],
+                )
+            };
+            for ch in 0..3 {
+                rgb[ch][i] = c[ch];
+                target[ch][i] = t[ch];
+            }
+        }
+        (rgb, target)
+    }
+
+    fn lab(px: [f32; 3]) -> [f64; 3] {
+        let (l, a, b) = srgb_to_oklab(F32s::splat(px[0]), F32s::splat(px[1]), F32s::splat(px[2]));
+        [l, a, b].map(|v| f64::from(v.to_array()[0]))
+    }
+
+    /// The gradient term from its definition: every right and lower neighbour
+    /// pair of the visible rows `top..`, with each step taken separately on the
+    /// composite and the target.
+    fn reference(rgb: &[Plane; 3], target: &[Plane; 3], top: usize) -> f64 {
+        let at = |planes: &[Plane; 3], x: usize, y: usize| {
+            let i = y * BANNER_W + x;
+            lab([planes[0][i], planes[1][i], planes[2][i]])
+        };
+        let step = |a: (usize, usize), b: (usize, usize)| {
+            let (ca, cb) = (at(rgb, a.0, a.1), at(rgb, b.0, b.1));
+            let (ta, tb) = (at(target, a.0, a.1), at(target, b.0, b.1));
+            (0..3)
+                .map(|ch| ((ca[ch] - cb[ch]) - (ta[ch] - tb[ch])).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let mut sum = 0.0;
+        for y in top..BANNER_H {
+            for x in 0..BANNER_W {
+                if x + 1 < BANNER_W {
+                    sum += step((x, y), (x + 1, y));
+                }
+                if y + 1 < BANNER_H {
+                    sum += step((x, y), (x, y + 1));
+                }
+            }
+        }
+        sum
+    }
+
+    /// With only the gradient weight on, the ranking error is the target ΔE
+    /// plus μ times the gradient term computed from its definition, on the top
+    /// row and on a lower row. The lower row runs second on the same residual
+    /// scratch, so its hidden head holds the top row's residuals, and its
+    /// planes' head holds unrelated colours.
+    #[test]
+    fn the_gradient_term_sums_the_neighbour_pairs_of_the_visible_rows() {
+        let mu = 0.75;
+        let mut residual = [Chunk::zeroed(); 3];
+        for (row, top) in [(0, 0), (1, HIDDEN_H)] {
+            let off = lane_offset(row);
+            let (rgb, target) = planes(top);
+            let mut lab_target = [Chunk::zeroed(); 3];
+            convert_target(&target, &mut lab_target, 0);
+
+            let ranked = ranking_error(
+                &rgb,
+                &lab_target,
+                &lab_target,
+                0.0,
+                0.0,
+                mu,
+                &mut residual,
+                off,
+            );
+            let got = f64::from(ranked - lab_error(&rgb, &lab_target, off)) / f64::from(mu);
+            let want = reference(&rgb, &target, top);
+            assert!(
+                (got - want).abs() < 1e-4 * want,
+                "row {row}: gradient term {got}, from its definition {want}"
+            );
+        }
+    }
 }

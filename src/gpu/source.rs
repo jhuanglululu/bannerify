@@ -11,8 +11,12 @@
 use std::fmt::Write;
 
 use crate::color::{COLORS_F32, COLORS_WSQ_SUM, NUM_COLORS, W_PERCEPTUAL, colors_oklab};
-use crate::geometry::TOP_HW;
+use crate::geometry::{BANNER_W, TOP_HW};
 use crate::oklab::{LINEARIZE, M1, M2};
+
+// The kernels' gradient term (`Back`, `gradient_step`) takes a pixel row to be
+// five `vec4`s.
+const _: () = assert!(BANNER_W == 5 * 4);
 
 /// An `f32` as a WGSL literal that parses back to the same value.
 fn wgsl_lit(v: f32) -> String {

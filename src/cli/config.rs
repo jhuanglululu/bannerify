@@ -27,6 +27,8 @@ const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
 const DEFAULT_PURITY_WEIGHT: f32 = 0.0;
 
+const DEFAULT_GRADIENT_WEIGHT: f32 = 0.0;
+
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 
 /// Default GPU memory budget, in MiB: the GPU backend's own default.
@@ -57,6 +59,9 @@ pub struct Config {
     /// Weight of the purity term in the exact rung's ranking error, `0` to
     /// disable it ([`crate::solver::refine`]).
     pub purity_weight: f32,
+    /// Weight of the gradient term in the exact rung's ranking error, `0` to
+    /// disable it ([`crate::solver::refine`]).
+    pub gradient_weight: f32,
     /// `(X, Y)`: how far each banner's target patch may be displaced, in wall
     /// pixels; `(0, 0)` disables the shift ([`crate::solver::shift`]).
     pub shift_range: (usize, usize),
@@ -102,6 +107,7 @@ pub struct ConfigToml {
     pub exact_candidates: Option<usize>,
     pub feature_weight: Option<f32>,
     pub purity_weight: Option<f32>,
+    pub gradient_weight: Option<f32>,
     pub shift_range: Option<Vec<usize>>,
     pub perturbations: Option<Vec<usize>>,
     pub seed: Option<u64>,
@@ -161,6 +167,12 @@ impl From<Args> for Config {
             "--purity-weight",
             config.purity_weight,
             "purity_weight",
+        ));
+        let gradient_weight = c.gradient_weight(pick(
+            args.gradient_weight,
+            "--gradient-weight",
+            config.gradient_weight,
+            "gradient_weight",
         ));
         let shift_range = c.shift_range(&args.shift_range, config.shift_range);
         let perturbations = c.perturbations(&args.perturbations, config.perturbations);
@@ -271,6 +283,7 @@ impl From<Args> for Config {
             refinement,
             feature_weight,
             purity_weight,
+            gradient_weight,
             shift_range,
             perturbations,
             seed: seed.map_or(0, |(s, _)| s),
@@ -313,6 +326,7 @@ impl Config {
             "exact_candidates": self.refinement.exact_candidates,
             "feature_weight": shortest(self.feature_weight),
             "purity_weight": shortest(self.purity_weight),
+            "gradient_weight": shortest(self.gradient_weight),
             "shift_range": [self.shift_range.0, self.shift_range.1],
             "perturbations": self.perturbations.map(|(t, d, r)| [t, d, r]),
             "seed": self.seed,
@@ -601,6 +615,17 @@ impl Checker {
     fn purity_weight(&mut self, value: Option<(f32, Origin)>) -> f32 {
         let Some((weight, origin)) = value else {
             return DEFAULT_PURITY_WEIGHT;
+        };
+        if !weight.is_finite() || weight < 0.0 {
+            self.invalid(origin, weight, "a finite number of at least 0.0");
+        }
+        weight
+    }
+
+    /// The same rule as the purity weight.
+    fn gradient_weight(&mut self, value: Option<(f32, Origin)>) -> f32 {
+        let Some((weight, origin)) = value else {
+            return DEFAULT_GRADIENT_WEIGHT;
         };
         if !weight.is_finite() || weight < 0.0 {
             self.invalid(origin, weight, "a finite number of at least 0.0");

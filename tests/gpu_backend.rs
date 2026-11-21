@@ -60,8 +60,9 @@ fn refinement(
 }
 
 /// Every configuration axis the backend branches on: exact rung on and off,
-/// feature weight zero and not, purity weight zero and not, window length, beam width, threshold off,
-/// refinement off, and perturbation rounds.
+/// feature weight zero and not, purity weight zero and not, gradient weight
+/// zero and not, window length, beam width, threshold off, refinement off, and
+/// perturbation rounds.
 ///
 /// The GPU kernels run in fast math, so a near-tie may resolve to another
 /// banner than the CPU's; what must hold is the quality. A wrong kernel shows
@@ -79,22 +80,45 @@ fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
     let cells = cells();
 
     let cases = [
-        ("defaults", refinement(2, 2, 20, 5, 0.7), None, 0.5, 0.0),
-        ("no exact rung", refinement(2, 2, 0, 5, 0.7), None, 0.5, 0.0),
+        (
+            "defaults",
+            refinement(2, 2, 20, 5, 0.7),
+            None,
+            0.5,
+            0.0,
+            0.0,
+        ),
+        (
+            "no exact rung",
+            refinement(2, 2, 0, 5, 0.7),
+            None,
+            0.5,
+            0.0,
+            0.0,
+        ),
         (
             "no feature map",
             refinement(2, 2, 20, 5, 0.7),
             None,
             0.0,
             0.0,
+            0.0,
         ),
-        ("purity term", refinement(2, 2, 20, 5, 0.7), None, 0.5, 0.5),
+        (
+            "purity term",
+            refinement(2, 2, 20, 5, 0.7),
+            None,
+            0.5,
+            0.5,
+            0.0,
+        ),
         (
             "purity term, no feature map",
             refinement(2, 2, 20, 5, 0.7),
             None,
             0.0,
             0.5,
+            0.0,
         ),
         (
             "long window, no threshold",
@@ -102,24 +126,51 @@ fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
             None,
             0.5,
             0.0,
+            0.0,
         ),
-        ("greedy only", refinement(0, 2, 20, 5, 0.7), None, 0.5, 0.0),
+        (
+            "greedy only",
+            refinement(0, 2, 20, 5, 0.7),
+            None,
+            0.5,
+            0.0,
+            0.0,
+        ),
         (
             "perturbation",
             refinement(2, 2, 20, 5, 0.7),
             Some((2, 2, 2)),
             0.5,
             0.0,
+            0.0,
+        ),
+        (
+            "gradient term",
+            refinement(2, 2, 20, 5, 0.7),
+            None,
+            0.5,
+            0.0,
+            1.0,
+        ),
+        (
+            "gradient and purity terms, no feature map",
+            refinement(2, 2, 20, 5, 0.7),
+            None,
+            0.0,
+            0.5,
+            1.0,
         ),
     ];
 
-    for (name, refinement, perturbations, feature_weight, purity_weight) in &cases {
+    for (name, refinement, perturbations, feature_weight, purity_weight, gradient_weight) in &cases
+    {
         let cfg = SolveCfg {
             patterns: &patterns,
             refinement,
             perturbations: *perturbations,
             feature_weight: *feature_weight,
             purity_weight: *purity_weight,
+            gradient_weight: *gradient_weight,
         };
         let expected: Vec<_> = cells
             .iter()

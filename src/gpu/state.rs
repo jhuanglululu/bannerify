@@ -35,7 +35,8 @@ pub(super) struct Params {
     pub threshold: f32,
     /// Purity weight.
     pub nu: f32,
-    pub pad: f32,
+    /// Gradient weight.
+    pub mu: f32,
 }
 
 // SAFETY: `#[repr(C)]`, sixteen 4-byte fields, no padding, any bit pattern.

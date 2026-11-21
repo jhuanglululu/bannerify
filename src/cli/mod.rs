@@ -198,6 +198,15 @@ pub struct Args {
     #[arg(short = 'U', long, value_name = "WEIGHT")]
     pub purity_weight: Option<f32>,
 
+    /// Weight of the gradient term: [default: 0, off]. Every pair of
+    /// neighbouring pixels whose difference does not match the image's is
+    /// charged the mismatch, times this weight, so edges land where the image
+    /// has them and nowhere else. An edge one pixel off is charged twice, so
+    /// pair it with --shift-range; 0 disables it
+    #[arg(help_heading = "Generation")]
+    #[arg(short = 'G', long, value_name = "WEIGHT")]
+    pub gradient_weight: Option<f32>,
+
     /// Per-banner shift: [X Y] [default: 0 0, off]; each banner may be solved
     /// against the image moved up to X pixels sideways (at most 2) and Y up or
     /// down (at most 4), whichever lets a clean banner fit best. The banner is

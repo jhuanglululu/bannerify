@@ -44,7 +44,7 @@ struct Params {
     lambda: f32,     // feature weight
     threshold: f32,  // `error_threshold`
     nu: f32,         // purity weight
-    pad: f32,
+    mu: f32,         // gradient weight
 }
 
 struct Slot {
@@ -203,9 +203,50 @@ fn purity(lab: Lab) -> vec4<f32> {
     return sqrt(d2);
 }
 
+/// The OKLab residuals (composite minus target) of the five lanes before the
+/// current one, oldest first, for the gradient term. A pixel row is 20 pixels,
+/// five lanes, so `d0` is the lane one row up and `d4` the lane to the left.
+/// Separate fields rather than an array, so nothing is indexed dynamically.
+struct Back {
+    d0: Lab,
+    d1: Lab,
+    d2: Lab,
+    d3: Lab,
+    d4: Lab,
+}
+
+/// `refine::gradient`, one lane at a time: the norms of the pairs that end at
+/// the pixels of lane `j`, whose residuals are `d`, with their left and upper
+/// neighbours, carried in `back` from the lanes before (which it then shifts
+/// by one). The view starts at lane `first`, a row start: a pixel in the first
+/// column has no left pair and the view's first row no upper one, so no pair
+/// wraps between rows or reaches above the view.
+fn gradient_step(back: ptr<function, Back>, j: u32, first: u32, d: Lab) -> vec4<f32> {
+    let left = (*back).d4;
+    var h = delta_e(d, vec4<f32>(left.l.w, d.l.xyz), vec4<f32>(left.a.w, d.a.xyz),
+                    vec4<f32>(left.b.w, d.b.xyz));
+    if (j % 5u == 0u) {
+        h.x = 0.0;
+    }
+    var g = h;
+    if (j >= first + 5u) {
+        let up = (*back).d0;
+        g = g + delta_e(d, up.l, up.a, up.b);
+    }
+    (*back).d0 = (*back).d1;
+    (*back).d1 = (*back).d2;
+    (*back).d2 = (*back).d3;
+    (*back).d3 = (*back).d4;
+    (*back).d4 = d;
+    return g;
+}
+
 /// The target ΔE `tde` of OKLab pixels `lab` at plane position `j` of `cell`,
-/// plus the feature term (`lambda > 0`) and the purity term (`nu > 0`).
-fn with_terms(cell: u32, j: u32, lambda: f32, nu: f32, lab: Lab, tde: vec4<f32>) -> vec4<f32> {
+/// plus the feature term (`lambda > 0`), the purity term (`nu > 0`) and the
+/// gradient term (`mu > 0`). `t` is the OKLab target there; `first` and `back`
+/// are [`gradient_step`]'s, and `back` is only touched when `mu > 0`.
+fn with_terms(cell: u32, j: u32, first: u32, lambda: f32, nu: f32, mu: f32,
+              back: ptr<function, Back>, lab: Lab, t: Lab, tde: vec4<f32>) -> vec4<f32> {
     var err = tde;
     if (lambda != 0.0) {
         let feature = delta_e(lab, cells[cell_at(cell, 6u) + j], cells[cell_at(cell, 7u) + j],
@@ -215,17 +256,28 @@ fn with_terms(cell: u32, j: u32, lambda: f32, nu: f32, lab: Lab, tde: vec4<f32>)
     if (nu != 0.0) {
         err = fma(purity(lab), vec4<f32>(nu), err);
     }
+    if (mu != 0.0) {
+        let d = Lab(lab.l - t.l, lab.a - t.a, lab.b - t.b);
+        err = fma(gradient_step(back, j, first, d), vec4<f32>(mu), err);
+    }
     return err;
 }
 
-/// One lane step of the ranking error (`lambda > 0` or `nu > 0`) or the
-/// pure-target error (both `0`) for sRGB pixels `(r, g, b)` at plane position
-/// `j` of `cell`.
-fn ranking_term(cell: u32, j: u32, lambda: f32, nu: f32, r: vec4<f32>, g: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+/// The OKLab target at plane position `j` of `cell`.
+fn target_lab(cell: u32, j: u32) -> Lab {
+    return Lab(cells[cell_at(cell, 3u) + j], cells[cell_at(cell, 4u) + j],
+               cells[cell_at(cell, 5u) + j]);
+}
+
+/// One lane step of the ranking error (any weight above `0`) or the
+/// pure-target error (all `0`) for sRGB pixels `(r, g, b)` at plane position
+/// `j` of `cell`; the lanes must come in order from the view's first, `first`.
+fn ranking_term(cell: u32, j: u32, first: u32, lambda: f32, nu: f32, mu: f32,
+                back: ptr<function, Back>, r: vec4<f32>, g: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     let lab = oklab(r, g, b);
-    let tde = delta_e(lab, cells[cell_at(cell, 3u) + j], cells[cell_at(cell, 4u) + j],
-                      cells[cell_at(cell, 5u) + j]);
-    return with_terms(cell, j, lambda, nu, lab, tde);
+    let t = target_lab(cell, j);
+    let tde = delta_e(lab, t.l, t.a, t.b);
+    return with_terms(cell, j, first, lambda, nu, mu, back, lab, t, tde);
 }
 
 /// The closed-form dye sweep shared by every rung-1 kernel.
@@ -563,14 +615,16 @@ fn rung2(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c2 = vec4<f32>(col.z);
 
     var acc = vec4<f32>(0.0);
-    for (var j = s.start / 4u; j < PL; j++) {
+    var back: Back;
+    let first = s.start / 4u;
+    for (var j = first; j < PL; j++) {
         let alp = alpha[al + j];
         let om = 1.0 - alp;
         let mul = sfx_src[sf + j];
         let r = fma(fma(prefixes[pr + j], om, c0 * alp), mul, sfx_src[sf + PL + j]);
         let g = fma(fma(prefixes[pr + PL + j], om, c1 * alp), mul, sfx_src[sf + 2u * PL + j]);
         let b = fma(fma(prefixes[pr + 2u * PL + j], om, c2 * alp), mul, sfx_src[sf + 3u * PL + j]);
-        acc = acc + ranking_term(s.cell, j, P.lambda, P.nu, r, g, b);
+        acc = acc + ranking_term(s.cell, j, first, P.lambda, P.nu, P.mu, &back, r, g, b);
     }
     r2[id] = hsum(acc);
 }
@@ -709,12 +763,14 @@ fn reopt_exact(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c1 = vec4<f32>(col.y);
     let c2 = vec4<f32>(col.z);
     var acc = vec4<f32>(0.0);
-    for (var j = s.start / 4u; j < PL; j++) {
+    var back: Back;
+    let first = s.start / 4u;
+    for (var j = first; j < PL; j++) {
         let mul = suffixes[at + j];
         let r = fma(c0, mul, suffixes[at + PL + j]);
         let g = fma(c1, mul, suffixes[at + 2u * PL + j]);
         let b = fma(c2, mul, suffixes[at + 3u * PL + j]);
-        acc = acc + ranking_term(s.cell, j, P.lambda, P.nu, r, g, b);
+        acc = acc + ranking_term(s.cell, j, first, P.lambda, P.nu, P.mu, &back, r, g, b);
     }
     reopt[id] = hsum(acc);
 }
@@ -787,17 +843,20 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let at = prefix_at(id, P.nl, 0u);
     var rank = vec4<f32>(0.0);
     var pure = vec4<f32>(0.0);
-    for (var j = s.start / 4u; j < PL; j++) {
+    var back: Back;
+    let first = s.start / 4u;
+    let terms = P.lambda != 0.0 || P.nu != 0.0 || P.mu != 0.0;
+    for (var j = first; j < PL; j++) {
         let lab = oklab(prefixes[at + j], prefixes[at + PL + j], prefixes[at + 2u * PL + j]);
-        let tde = delta_e(lab, cells[cell_at(s.cell, 3u) + j], cells[cell_at(s.cell, 4u) + j],
-                          cells[cell_at(s.cell, 5u) + j]);
+        let t = target_lab(s.cell, j);
+        let tde = delta_e(lab, t.l, t.a, t.b);
         pure = pure + tde;
-        if (P.lambda != 0.0 || P.nu != 0.0) {
-            rank = rank + with_terms(s.cell, j, P.lambda, P.nu, lab, tde);
+        if (terms) {
+            rank = rank + with_terms(s.cell, j, first, P.lambda, P.nu, P.mu, &back, lab, t, tde);
         }
     }
     sols[id].lab_err = hsum(pure);
-    if (P.lambda != 0.0 || P.nu != 0.0) {
+    if (terms) {
         sols[id].rank_err = hsum(rank);
     } else {
         sols[id].rank_err = hsum(pure);

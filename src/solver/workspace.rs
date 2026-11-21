@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::cli::config::RefinementConfig;
-use crate::geometry::{NTOP_HW, TOP_HW};
+use crate::geometry::{BANNER_W, NTOP_HW, TOP_HW};
 use crate::pattern::Patterns;
 use crate::simd::{Chunk, F32s, LANES};
 use crate::zip;
@@ -30,6 +30,12 @@ pub type Plane = Chunk<TOP_HW>;
 pub const LOWER_OFF: usize = (TOP_HW - NTOP_HW) / LANES;
 
 const _: () = assert!((TOP_HW - NTOP_HW).is_multiple_of(16));
+
+/// A [`Plane`] followed by spare pixels that are never written, so they stay
+/// zero: the gradient term reads every pixel's right and lower neighbour as an
+/// unaligned lane, and for the last pixels of the patch that lane runs up to
+/// one pixel row plus one lane past the plane ([`super::refine`]).
+pub(super) type PaddedPlane = Chunk<{ TOP_HW + BANNER_W.next_multiple_of(16) }>;
 
 /// Lane offset of banner row `row`'s patch inside a [`Plane`]: `0` for the top
 /// row, [`LOWER_OFF`] for every other.
@@ -62,10 +68,10 @@ pub struct Solution {
     /// ([`super::refine::lab_error`] explains why it is not squared).
     ///
     /// Always the **pure target** error as it leaves [`Workspace::solve`], even
-    /// when the solver ranked on one with the feature or purity term added
-    /// ([`super::refine::ranking_error`]): the readout has to mean the same
-    /// thing at every `--feature-weight` and `--purity-weight` for the numbers
-    /// to be comparable.
+    /// when the solver ranked on one with the feature, purity or gradient term
+    /// added ([`super::refine::ranking_error`]): the readout has to mean the
+    /// same thing at every `--feature-weight`, `--purity-weight` and
+    /// `--gradient-weight` for the numbers to be comparable.
     /// Inside the solve it carries whichever error that stage ranks on.
     pub error: f32,
     /// [`Solution::error`] per pixel — the number that reads directly as a
@@ -174,6 +180,9 @@ pub struct SolveCfg<'a> {
     /// Weight of the purity term in the exact rung's ranking error,
     /// `--purity-weight`; `0` leaves it out ([`super::refine`]).
     pub purity_weight: f32,
+    /// Weight of the gradient term in the exact rung's ranking error,
+    /// `--gradient-weight`; `0` leaves it out ([`super::refine`]).
+    pub gradient_weight: f32,
 }
 
 /// Reusable solver buffers for one worker.
@@ -202,6 +211,10 @@ pub struct Workspace {
     pub(super) cand: [Plane; 3],
     /// The target converted to OKLab, once per cell.
     pub(crate) lab_target: [Plane; 3],
+    /// The exact rung's per-pixel OKLab residual, composite minus target, of
+    /// the candidate it last scored. Scratch for the gradient term; written
+    /// only when the gradient weight is non-zero.
+    pub(super) lab_residual: [PaddedPlane; 3],
     /// The cell's feature map — the idealised two-layer banner every rung is
     /// pulled towards ([`super::feature`]) — composited in sRGB.
     pub(super) feature: [Plane; 3],
@@ -238,6 +251,7 @@ impl Workspace {
             beam: Beam::new(candidates.max(1)),
             cand: [Chunk::zeroed(); 3],
             lab_target: [Chunk::zeroed(); 3],
+            lab_residual: [Chunk::zeroed(); 3],
             feature: [Chunk::zeroed(); 3],
             lab_feature: [Chunk::zeroed(); 3],
             feat: feature::Buffers::default(),
@@ -325,6 +339,7 @@ impl Workspace {
                 cfg.refinement,
                 cfg.feature_weight,
                 cfg.purity_weight,
+                cfg.gradient_weight,
                 alphas,
                 n_layers,
             );
@@ -340,6 +355,7 @@ impl Workspace {
                 cfg.refinement,
                 cfg.feature_weight,
                 cfg.purity_weight,
+                cfg.gradient_weight,
                 alphas,
                 n_layers,
                 rng,
@@ -399,6 +415,7 @@ mod tests {
             perturbations: Some((2, 2, 1)),
             feature_weight: 0.0,
             purity_weight: 0.0,
+            gradient_weight: 0.0,
         }
     }
 
@@ -469,6 +486,7 @@ mod tests {
                 &refinement,
                 0.0,
                 0.0,
+                0.0,
                 &patterns.top,
                 LAYERS,
             );
@@ -477,6 +495,7 @@ mod tests {
                 &mut solution,
                 (2, 2, 1),
                 &refinement,
+                0.0,
                 0.0,
                 0.0,
                 &patterns.top,
@@ -500,10 +519,10 @@ mod tests {
         }
     }
 
-    /// The reported error stays comparable across feature and purity weights:
-    /// whatever the solver ranked on, what comes back is `Σ ΔE` of the final
-    /// composite against the *pure* target — recomputed here pixel by pixel,
-    /// from the patch as it was handed in, without touching the solver's
+    /// The reported error stays comparable across feature, purity and gradient
+    /// weights: whatever the solver ranked on, what comes back is `Σ ΔE` of the
+    /// final composite against the *pure* target — recomputed here pixel by
+    /// pixel, from the patch as it was handed in, without touching the solver's
     /// kernels.
     #[test]
     fn the_reported_error_is_pure_target_delta_e_at_a_non_zero_weight() {
@@ -512,6 +531,7 @@ mod tests {
         let cfg = SolveCfg {
             feature_weight: 0.75,
             purity_weight: 0.5,
+            gradient_weight: 0.25,
             ..config(&patterns, &refinement)
         };
 

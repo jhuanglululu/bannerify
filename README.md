@@ -151,6 +151,12 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   distance to the nearest of the 16 dye colors, times ν, so a banner drawn
   in clean dye colors beats one whose blends average to the right shade.
   It penalises photographic shades, so expect a higher error on photographs.
+- `-G, --gradient-weight μ` — how strongly the solver keeps edges where the
+  image has them and nowhere else (default `0`, off). Every pair of
+  neighbouring pixels whose difference does not match the image's is
+  charged the mismatch, times μ. An edge one pixel off is charged twice,
+  once where it is missing and once where it is extra, so use it together
+  with `--shift-range`.
 - `-S, --shift-range X Y` — lets each banner be solved against the image
   moved by up to `X` pixels sideways (at most `2`) and `Y` up or down (at
   most `4`), whichever position a clean banner fits best (default `0 0`,

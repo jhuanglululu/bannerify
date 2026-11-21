@@ -85,6 +85,14 @@ feature_weight = 0.5
 # it penalises photographic shades, so expect a higher error on photographs
 purity_weight = 0
 
+# how strongly the solver keeps edges where the image has them and nowhere else
+# every pair of neighbouring pixels whose difference does not match the
+# image's difference is charged the mismatch, times this weight; 0 (the
+# default) turns it off
+# an edge one pixel off is charged twice (once for the missing edge, once for
+# the extra one), so pair it with shift_range
+gradient_weight = 0
+
 # per-banner shift: [X, Y]
 # each banner may be solved against the image moved up to X pixels sideways
 # and Y pixels up or down, whichever lets a clean banner fit best; [0, 0] (the

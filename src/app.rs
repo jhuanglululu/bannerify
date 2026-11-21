@@ -756,6 +756,7 @@ fn run(config: &Config) {
             perturbations: config.perturbations,
             feature_weight: config.feature_weight,
             purity_weight: config.purity_weight,
+            gradient_weight: config.gradient_weight,
         },
         seed: config.seed,
         shift_range: config.shift_range,
