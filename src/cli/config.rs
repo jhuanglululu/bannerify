@@ -17,6 +17,7 @@ use crate::cli::{Args, BackendChoice, OutputFormat};
 use crate::layout::{Dimension, ResizingMethod};
 use crate::logger::{Diagnostic, Kind, fail, warn};
 use crate::pattern;
+use crate::solver::feature::LAYER_COUNTS;
 use crate::solver::shift::MAX_SHIFT;
 
 const DEFAULT_EXACT_CANDIDATES: usize = 20;
@@ -26,6 +27,8 @@ const DEFAULT_EXACT_CANDIDATES: usize = 20;
 const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
 const DEFAULT_PURITY_WEIGHT: f32 = 0.0;
+
+const DEFAULT_FEATURE_LAYERS: usize = 3;
 
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 
@@ -57,6 +60,9 @@ pub struct Config {
     /// Weight of the purity term in the exact rung's ranking error, `0` to
     /// disable it ([`crate::solver::refine`]).
     pub purity_weight: f32,
+    /// Most layers of the feature map, one of [`LAYER_COUNTS`]
+    /// ([`crate::solver::feature`]).
+    pub feature_layers: usize,
     /// `(X, Y)`: how far each banner's target patch may be displaced, in wall
     /// pixels; `(0, 0)` disables the shift ([`crate::solver::shift`]).
     pub shift_range: (usize, usize),
@@ -102,6 +108,7 @@ pub struct ConfigToml {
     pub exact_candidates: Option<usize>,
     pub feature_weight: Option<f32>,
     pub purity_weight: Option<f32>,
+    pub feature_layers: Option<usize>,
     pub shift_range: Option<Vec<usize>>,
     pub perturbations: Option<Vec<usize>>,
     pub seed: Option<u64>,
@@ -161,6 +168,12 @@ impl From<Args> for Config {
             "--purity-weight",
             config.purity_weight,
             "purity_weight",
+        ));
+        let feature_layers = c.feature_layers(pick(
+            args.feature_layers,
+            "--feature-layers",
+            config.feature_layers,
+            "feature_layers",
         ));
         let shift_range = c.shift_range(&args.shift_range, config.shift_range);
         let perturbations = c.perturbations(&args.perturbations, config.perturbations);
@@ -271,6 +284,7 @@ impl From<Args> for Config {
             refinement,
             feature_weight,
             purity_weight,
+            feature_layers,
             shift_range,
             perturbations,
             seed: seed.map_or(0, |(s, _)| s),
@@ -313,6 +327,7 @@ impl Config {
             "exact_candidates": self.refinement.exact_candidates,
             "feature_weight": shortest(self.feature_weight),
             "purity_weight": shortest(self.purity_weight),
+            "feature_layers": self.feature_layers,
             "shift_range": [self.shift_range.0, self.shift_range.1],
             "perturbations": self.perturbations.map(|(t, d, r)| [t, d, r]),
             "seed": self.seed,
@@ -606,6 +621,16 @@ impl Checker {
             self.invalid(origin, weight, "a finite number of at least 0.0");
         }
         weight
+    }
+
+    fn feature_layers(&mut self, value: Option<(usize, Origin)>) -> usize {
+        let Some((layers, origin)) = value else {
+            return DEFAULT_FEATURE_LAYERS;
+        };
+        if !LAYER_COUNTS.contains(&layers) {
+            self.invalid(origin, layers, "2, 3 or 4");
+        }
+        layers
     }
 
     /// The shift may not exceed the banner's margins inside its block

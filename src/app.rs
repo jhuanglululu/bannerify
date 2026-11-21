@@ -237,7 +237,7 @@ fn prepare_column(
     // the stream as it stands, and the stream is then replayed past that
     // cell's draws for the next one.
     let mut rng = Rng::new(ctx.seed, item.col as u64);
-    let mut shifts = ShiftSearch::new(ctx.shift_range);
+    let mut shifts = ShiftSearch::new(ctx.shift_range, ctx.solve.feature_layers);
     let mut unshifted = Vec::with_capacity(cells.len());
     let mut gather = Duration::ZERO;
     for (row, cell) in cells.iter_mut().enumerate() {
@@ -756,6 +756,7 @@ fn run(config: &Config) {
             perturbations: config.perturbations,
             feature_weight: config.feature_weight,
             purity_weight: config.purity_weight,
+            feature_layers: config.feature_layers,
         },
         seed: config.seed,
         shift_range: config.shift_range,

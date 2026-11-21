@@ -120,6 +120,7 @@ fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
             perturbations: *perturbations,
             feature_weight: *feature_weight,
             purity_weight: *purity_weight,
+            feature_layers: 3,
         };
         let expected: Vec<_> = cells
             .iter()

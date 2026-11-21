@@ -207,6 +207,7 @@ mod tests {
                     perturbations,
                     feature_weight: 0.0,
                     purity_weight: 0.0,
+                    feature_layers: 3,
                 };
                 let mut ws = Workspace::new(5, refinement.refinement_candidate);
                 ws.begin(row);

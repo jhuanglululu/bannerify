@@ -143,9 +143,12 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   lower it (or `0`) for speed.
 - `-F, --feature-weight λ` — how hard the solver is pulled towards clean
   flat colors and crisp edges (default `0.5`). Every banner is also fitted
-  by an idealised two-layer banner in pure dye colors, and λ weighs that
-  fit against the raw pixels. Raise it when logos and flat areas come out
-  muddy, lower it (or `0`) for photographs.
+  by an idealised banner of a few layers in pure dye colors, and λ weighs
+  that fit against the raw pixels. Raise it when logos and flat areas come
+  out muddy, lower it (or `0`) for photographs.
+- `--feature-layers N` — how many layers that idealised banner may have:
+  `2`, `3` or `4` (default `3`). More layers fit the image more closely and
+  take more time, both for the feature map and for `--shift-range`.
 - `-U, --purity-weight ν` — how strongly the solver prefers pure dye
   colors over mixes of them (default `0`, off). Every pixel is charged its
   distance to the nearest of the 16 dye colors, times ν, so a banner drawn

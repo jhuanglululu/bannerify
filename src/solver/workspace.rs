@@ -145,8 +145,8 @@ pub struct Stages {
     /// Per-cell OKLab bookkeeping: converting the target and the final ΔE
     /// readout. The exact scoring itself is counted under refinement.
     pub oklab: Duration,
-    /// Feature-map construction: the snap, the pattern-pair search and the
-    /// blend. Zero when `--feature-weight` is `0`.
+    /// Feature-map construction: the snap, the pattern search and the blend.
+    /// Zero when `--feature-weight` is `0`.
     pub feature: Duration,
 }
 
@@ -174,6 +174,9 @@ pub struct SolveCfg<'a> {
     /// Weight of the purity term in the exact rung's ranking error,
     /// `--purity-weight`; `0` leaves it out ([`super::refine`]).
     pub purity_weight: f32,
+    /// The feature map's most layers, `--feature-layers`, one of
+    /// [`feature::LAYER_COUNTS`].
+    pub feature_layers: usize,
 }
 
 /// Reusable solver buffers for one worker.
@@ -202,8 +205,9 @@ pub struct Workspace {
     pub(super) cand: [Plane; 3],
     /// The target converted to OKLab, once per cell.
     pub(crate) lab_target: [Plane; 3],
-    /// The cell's feature map — the idealised two-layer banner every rung is
-    /// pulled towards ([`super::feature`]) — composited in sRGB.
+    /// The cell's feature map — the idealised banner of at most
+    /// `--feature-layers` layers every rung is pulled towards
+    /// ([`super::feature`]) — composited in sRGB.
     pub(super) feature: [Plane; 3],
     /// [`Workspace::feature`] in OKLab, for the exact rung.
     pub(crate) lab_feature: [Plane; 3],
@@ -301,7 +305,7 @@ impl Workspace {
 
         if cfg.feature_weight > 0.0 {
             let t = std::time::Instant::now();
-            feature::build(self, alphas, cfg.feature_weight);
+            feature::build(self, alphas, cfg.feature_weight, cfg.feature_layers);
             self.stages.feature += t.elapsed();
         }
 
@@ -399,6 +403,7 @@ mod tests {
             perturbations: Some((2, 2, 1)),
             feature_weight: 0.0,
             purity_weight: 0.0,
+            feature_layers: 3,
         }
     }
 
