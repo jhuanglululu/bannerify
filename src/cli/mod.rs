@@ -191,7 +191,7 @@ pub struct Args {
     #[arg(short = 'F', long, value_name = "WEIGHT")]
     pub feature_weight: Option<f32>,
 
-    /// Most layers of the feature map: 2, 3 or 4 [default: 3]. More layers fit
+    /// Most layers of the feature map: 2, 3 or 4 [default: 2]. More layers fit
     /// the image more closely and take more time, both for the feature map
     /// and for the shift choice (--shift-range)
     #[arg(help_heading = "Generation")]

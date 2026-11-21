@@ -28,7 +28,7 @@ const DEFAULT_FEATURE_WEIGHT: f32 = 0.5;
 
 const DEFAULT_PURITY_WEIGHT: f32 = 0.0;
 
-const DEFAULT_FEATURE_LAYERS: usize = 3;
+const DEFAULT_FEATURE_LAYERS: usize = 2;
 
 const DEFAULT_LAYERS: (usize, usize) = (4, 6);
 

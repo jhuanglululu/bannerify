@@ -147,7 +147,7 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   that fit against the raw pixels. Raise it when logos and flat areas come
   out muddy, lower it (or `0`) for photographs.
 - `--feature-layers N` — how many layers that idealised banner may have:
-  `2`, `3` or `4` (default `3`). More layers fit the image more closely and
+  `2`, `3` or `4` (default `2`). More layers fit the image more closely and
   take more time, both for the feature map and for `--shift-range`.
 - `-U, --purity-weight ν` — how strongly the solver prefers pure dye
   colors over mixes of them (default `0`, off). Every pixel is charged its
