@@ -56,12 +56,16 @@ stretch = false
 
 # * Generation Options *
 
-# patterns in the list will not be used
-exclude_patterns = []
+# patterns the solver may use: pattern ids and pattern sets, applied left to
+# right; a leading '-' removes a pattern or a set instead of adding it
+# "default" is every pattern; "dye_only" leaves out the 10 patterns that need
+# a banner pattern item in the loom (globe, creeper, skull, ...)
+# e.g. ["dye_only"] or ["default", "-globe", "-mojang"]
+patterns = ["default"]
 
 # blocks the background may be built from: block ids and block sets, applied
 # left to right; a leading '-' removes a block or a set instead of adding it
-# "default" is every block; `bannerify --list sets` prints the other sets
+# "default" is every block; `bannerify --list block-sets` prints the other sets
 # e.g. ["default", "-falling", "-beacon"] or ["wools", "concretes"]
 blocks = ["default"]
 
@@ -143,12 +147,16 @@ refinement_candidate = 5
 # 8 is the knee of the curve; above 20 the returns are tiny
 exact_candidates = 20
 
-# * Block Sets *
+# * Pattern Sets and Block Sets *
 
-# your own block sets, usable by name in `blocks` above and in --blocks
-# a set is written like `blocks`: ids and other sets, '-' to remove
-# a set cannot take the name of a block or of a built-in set
-# this table has to stay at the end of the file: in TOML every key below a
+# your own sets, usable by name in `patterns` / `blocks` above and in
+# --patterns / --blocks
+# a set is written like those lists: ids and other sets, '-' to remove
+# a set cannot take the name of an id or of a built-in set of its kind
+# these tables have to stay at the end of the file: in TOML every key below a
 # [table] header belongs to that table
+[pattern_sets]
+# plain = ["dye_only", "-gradient", "-gradient_up"]
+
 [block_sets]
 # quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]

@@ -169,37 +169,48 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
 ### 選擇圖案與方塊
 
 ```sh
-bannerify input.jpg output.html --row 20 -P globe,mojang -B default,-falling,-beacon
+bannerify input.jpg output.html --row 20 -P dye_only -B default,-falling,-beacon
 ```
 
-- `-P, --exclude-patterns`：求解器不可使用的旗幟圖案 ID（例如你無法合成
-  的圖案）。
+兩個選項的內容都是以逗號分隔的 ID 和集合，由左到右套用；開頭加上 `-`
+表示移除該 ID 或集合，而不是加入。清單一開始是空的，所以要先寫一個集合。
+
+- `-P, --patterns`：求解器可以使用的旗幟圖案（預設 `default`，也就是所有
+  圖案）。
+  - `dye_only`：只用織布機單靠染料就能做出的圖案，不含需要旗幟圖形物品
+    的 10 種：`bricks`、`creeper`、`curly_border`、`flow`、`flower`、
+    `globe`、`guster`、`mojang`、`piglin` 和 `skull`。
+  - `dye_only,creeper`：同上，再加上一個你有對應物品的圖案。
+  - `default,-globe,-mojang`：所有圖案，但去掉其中兩個。
 - `-B, --blocks`：背景可以使用的方塊（預設 `default`，也就是所有方塊）。
-  內容是以逗號分隔的方塊 ID 和方塊集合，由左到右套用；開頭加上 `-` 表示
-  移除該方塊或集合，而不是加入。清單一開始是空的，所以要先寫一個集合：
   - `default,-falling,-beacon`：所有方塊，但不含會掉落的方塊（沙、礫石、
     混凝土粉末）和烽火台。
   - `wools,concretes,-black_wool`：兩個顏色系列，再去掉一個方塊。
 
-內建的集合有 `default`、`wools`、`concretes`、`concrete_powders`、
-`terracottas`、`glazed_terracottas`、`logs`、`planks`、`ores`、`falling`
-和 `expensive`。設定檔可以在 `[block_sets]` 底下用同樣的寫法定義更多
+內建的圖案集合有 `default` 和 `dye_only`。內建的方塊集合有 `default`、
+`wools`、`concretes`、`concrete_powders`、`terracottas`、
+`glazed_terracottas`、`logs`、`planks`、`ores`、`falling` 和 `expensive`。
+設定檔可以在 `[pattern_sets]` 和 `[block_sets]` 底下用同樣的寫法定義更多
 集合，之後就能在命令列用名稱指定：
 
 ```toml
+[pattern_sets]
+plain = ["dye_only", "-gradient", "-gradient_up"]
+
 [block_sets]
 quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]
 ```
 
 ```sh
-bannerify input.jpg output.html --row 20 -f config.toml -B quiet,-red_wool
+bannerify input.jpg output.html --row 20 -f config.toml -P plain -B quiet,-red_wool
 ```
 
-既不是集合也不是方塊的 ID 會被視為錯誤，除非後面用 `-id` 把它移除。
-自訂集合不能使用方塊或內建集合的名稱。
+既不是集合也不是 ID 的名稱會被視為錯誤，除非後面用 `-名稱` 把它移除。
+自訂集合不能使用 ID 或同類內建集合的名稱。
 
-`bannerify --list patterns`（或 `blocks`、`sets`、`dyes`、`backends`）會
-列出所有有效的 ID；`--list sets --json` 還會列出每個集合包含的方塊。
+`bannerify --list patterns`（或 `blocks`、`pattern-sets`、`block-sets`、
+`dyes`、`backends`）會列出所有有效的 ID；`--list pattern-sets --json` 和
+`--list block-sets --json` 還會列出每個集合的內容。
 
 ### 其他輸出選項
 
@@ -280,8 +291,8 @@ bannerify input.jpg output.html --row 20 -f config.toml
 $ bannerify input.jpg out.html --row 0 -P glob --json
 {"ok":false,"schema_version":1,"errors":[
   {"kind":"invalid_value","message":"--row must be at least 1 (got 0)","option":"--row","value":"0"},
-  {"kind":"unknown_id","message":"unknown pattern id 'glob'","option":"--exclude-patterns","value":"glob",
-   "suggestions":["globe"],"hint":"run `bannerify --list patterns` for every valid id"}],"warnings":[]}
+  {"kind":"unknown_id","message":"unknown pattern id 'glob'","option":"--patterns","value":"glob",
+   "suggestions":["globe"],"hint":"run `bannerify --list patterns` for every valid id and `bannerify --list pattern-sets` for the built-in sets"}],"warnings":[]}
 ```
 
 結束代碼：`0` 成功，`2` 引數或設定檔無效，`3` 輸入圖片不存在或無法

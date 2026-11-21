@@ -186,39 +186,52 @@ When the image's aspect ratio doesn't match the wall's:
 ### Choosing patterns and blocks
 
 ```sh
-bannerify input.jpg output.html --row 20 -P globe,mojang -B default,-falling,-beacon
+bannerify input.jpg output.html --row 20 -P dye_only -B default,-falling,-beacon
 ```
 
-- `-P, --exclude-patterns` — banner pattern ids the solver may not use
-  (e.g. patterns you can't craft).
+Both options take a comma-separated list of ids and sets, applied left to
+right; a leading `-` removes an id or a set instead of adding it. The list
+starts empty, so begin with a set.
+
+- `-P, --patterns` — the banner patterns the solver may use (default
+  `default`, every pattern).
+  - `dye_only` — only the patterns a loom makes from dye alone. It leaves
+    out the 10 that need a banner pattern item: `bricks`, `creeper`,
+    `curly_border`, `flow`, `flower`, `globe`, `guster`, `mojang`, `piglin`
+    and `skull`.
+  - `dye_only,creeper` — the same, plus one pattern you have the item for.
+  - `default,-globe,-mojang` — everything except two patterns.
 - `-B, --blocks` — the blocks the background may be built from (default
-  `default`, every block). It is a comma-separated list of block ids and
-  block sets, applied left to right; a leading `-` removes a block or a set
-  instead of adding it. The list starts empty, so begin with a set:
+  `default`, every block).
   - `default,-falling,-beacon` — everything except the blocks that fall
     (sand, gravel, concrete powder) and the beacon.
   - `wools,concretes,-black_wool` — two color families, minus one block.
 
-The built-in sets are `default`, `wools`, `concretes`, `concrete_powders`,
-`terracottas`, `glazed_terracottas`, `logs`, `planks`, `ores`, `falling` and
-`expensive`. A config file can define more under `[block_sets]`, written
-the same way, and they can then be named on the command line:
+The built-in pattern sets are `default` and `dye_only`. The built-in block
+sets are `default`, `wools`, `concretes`, `concrete_powders`, `terracottas`,
+`glazed_terracottas`, `logs`, `planks`, `ores`, `falling` and `expensive`.
+A config file can define more under `[pattern_sets]` and `[block_sets]`,
+written the same way, and they can then be named on the command line:
 
 ```toml
+[pattern_sets]
+plain = ["dye_only", "-gradient", "-gradient_up"]
+
 [block_sets]
 quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]
 ```
 
 ```sh
-bannerify input.jpg output.html --row 20 -f config.toml -B quiet,-red_wool
+bannerify input.jpg output.html --row 20 -f config.toml -P plain -B quiet,-red_wool
 ```
 
-An id that is neither a set nor a block is an error, unless a later `-id`
-removes it again. A custom set cannot take the name of a block or of a
-built-in set.
+A name that is neither a set nor an id is an error, unless a later `-name`
+removes it again. A custom set cannot take the name of an id or of a
+built-in set of its kind.
 
-`bannerify --list patterns` (or `blocks`, `sets`, `dyes`, `backends`) prints
-every valid id; `--list sets --json` also prints the blocks of each set.
+`bannerify --list patterns` (or `blocks`, `pattern-sets`, `block-sets`,
+`dyes`, `backends`) prints every valid id; `--list pattern-sets --json` and
+`--list block-sets --json` also print what each set contains.
 
 ### Output extras
 
@@ -306,8 +319,8 @@ they apply:
 $ bannerify input.jpg out.html --row 0 -P glob --json
 {"ok":false,"schema_version":1,"errors":[
   {"kind":"invalid_value","message":"--row must be at least 1 (got 0)","option":"--row","value":"0"},
-  {"kind":"unknown_id","message":"unknown pattern id 'glob'","option":"--exclude-patterns","value":"glob",
-   "suggestions":["globe"],"hint":"run `bannerify --list patterns` for every valid id"}],"warnings":[]}
+  {"kind":"unknown_id","message":"unknown pattern id 'glob'","option":"--patterns","value":"glob",
+   "suggestions":["globe"],"hint":"run `bannerify --list patterns` for every valid id and `bannerify --list pattern-sets` for the built-in sets"}],"warnings":[]}
 ```
 
 Exit codes: `0` success, `2` invalid arguments or config file, `3` input
