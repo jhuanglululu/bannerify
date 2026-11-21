@@ -351,7 +351,6 @@ impl GpuBackend {
     fn prepare(&mut self, cells: &[&PreparedCell], cfg: &SolveCfg<'_>) {
         let buffers = self.buffers.as_mut().expect("ensured by solve");
         let lambda = cfg.feature_weight;
-        let layers = cfg.feature_layers;
         let alphas = &cfg.patterns.top;
         let t = Instant::now();
         let dst = &mut buffers.cells.slice_mut::<f32>()[..cells.len() * CELL_PLANES * PLANE];
@@ -370,7 +369,7 @@ impl GpuBackend {
                     let oklab = t.elapsed();
                     let t = Instant::now();
                     if lambda > 0.0 {
-                        feature::build(ws, alphas, lambda, layers);
+                        feature::build(ws, alphas, lambda);
                     }
                     let feature = t.elapsed();
                     let planes = ws

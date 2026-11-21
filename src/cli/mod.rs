@@ -183,20 +183,12 @@ pub struct Args {
     pub perturbations: Vec<usize>,
 
     /// Weight of the feature-map term: [default: 0.5]. Every cell is also
-    /// fitted by an idealised banner of a few layers (--feature-layers) in
-    /// pure dye colors, and the solver is pulled towards it by this weight --
-    /// cleaner flat areas and crisper edges, at the cost of some pixel-level
-    /// accuracy. 0 disables it
+    /// fitted by an idealised 2-layer banner in pure dye colors, and the solver
+    /// is pulled towards it by this weight -- cleaner flat areas and crisper
+    /// edges, at the cost of some pixel-level accuracy. 0 disables it
     #[arg(help_heading = "Generation")]
     #[arg(short = 'F', long, value_name = "WEIGHT")]
     pub feature_weight: Option<f32>,
-
-    /// Most layers of the feature map: 2, 3 or 4 [default: 2]. More layers fit
-    /// the image more closely and take more time, both for the feature map
-    /// and for the shift choice (--shift-range)
-    #[arg(help_heading = "Generation")]
-    #[arg(long, value_name = "N")]
-    pub feature_layers: Option<usize>,
 
     /// Weight of the purity term: [default: 0, off]. Every pixel is charged its
     /// distance to the nearest pure dye color, times this weight, so the

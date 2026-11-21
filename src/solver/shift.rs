@@ -12,12 +12,10 @@
 //!
 //! Once per cell, before the solve, and only from the feature-map search
 //! ([`super::feature`]): every shifted patch is snapped and searched, and the
-//! shift whose best banner of at most `--feature-layers` layers scores highest
-//! wins. Scores are comparable across shifts because every patch has the same
-//! pixel count. The search is cheap next to a solve, and its score measures
-//! exactly what the shift is for: how much of the patch a clean banner can
-//! cover. Its cost is paid once per shift tried, so it grows with the shift
-//! range and with the layer count.
+//! shift whose best two-layer banner scores highest wins. Scores are
+//! comparable across shifts because every patch has the same pixel count. The
+//! search is cheap next to a solve, and its score measures exactly what the
+//! shift is for: how much of the patch a clean banner can cover.
 //!
 //! Zero shift is scored first and the others follow in order of increasing
 //! distance ([`order`]). A later shift has to score strictly higher, so a tie
@@ -54,8 +52,6 @@ pub struct Shifted {
 pub struct ShiftSearch {
     /// Every non-zero shift of the range, in the order they are tried.
     shifts: Vec<(isize, isize)>,
-    /// The feature map's layer count, `--feature-layers`.
-    layers: usize,
     /// Scratch for the feature-map search.
     feat: feature::Buffers,
     /// The shifted patch being scored.
@@ -63,14 +59,11 @@ pub struct ShiftSearch {
 }
 
 impl ShiftSearch {
-    /// For `range = (X, Y)`, each at most [`MAX_SHIFT`], scoring patches by
-    /// their best banner of at most `layers` layers
-    /// ([`feature::LAYER_COUNTS`]). `(0, 0)` makes [`ShiftSearch::gather`] a
-    /// plain [`BandView::gather`].
-    pub fn new(range: (usize, usize), layers: usize) -> Self {
+    /// For `range = (X, Y)`, each at most [`MAX_SHIFT`]. `(0, 0)` makes
+    /// [`ShiftSearch::gather`] a plain [`BandView::gather`].
+    pub fn new(range: (usize, usize)) -> Self {
         Self {
             shifts: order(range),
-            layers,
             feat: feature::Buffers::default(),
             cand: [Chunk::zeroed(); 3],
         }
@@ -96,21 +89,13 @@ impl ShiftSearch {
         // A lower row solves only the tail of its planes; the search scores
         // exactly that view, as the solve will.
         let start = patch_rows(row).2;
-        let layers = self.layers;
-        let mut best = feature::best_score(
-            &mut self.feat,
-            target,
-            alphas,
-            start,
-            layers,
-            f32::NEG_INFINITY,
-        )
-        .expect("every banner beats -inf");
+        let mut best =
+            feature::best_score(&mut self.feat, target, alphas, start, f32::NEG_INFINITY)
+                .expect("every banner beats -inf");
         let mut chosen: Option<Shifted> = None;
         for &shift in &self.shifts {
             view.gather_at(row, col, shift, &mut self.cand);
-            let Some(score) =
-                feature::best_score(&mut self.feat, &self.cand, alphas, start, layers, best)
+            let Some(score) = feature::best_score(&mut self.feat, &self.cand, alphas, start, best)
             else {
                 continue;
             };
@@ -157,12 +142,10 @@ mod tests {
     }
 
     /// The shift chosen for every banner row of a one-column wall of `rows`
-    /// banner rows whose pixels in wall column `x` are all `pixel(x)`, scored
-    /// by the feature-map search at `layers` layers.
+    /// banner rows whose pixels in wall column `x` are all `pixel(x)`.
     fn chosen(
         rows: usize,
         range: (usize, usize),
-        layers: usize,
         pixel: impl Fn(usize) -> [u8; 3],
     ) -> Vec<(isize, isize)> {
         let (w, h) = (BLOCK_SIDE, wall_height(rows));
@@ -173,7 +156,7 @@ mod tests {
         let view = BandView::new(Some(&band), 0, 0, [0; 3]);
 
         let patterns = load(&HashSet::new());
-        let mut search = ShiftSearch::new(range, layers);
+        let mut search = ShiftSearch::new(range);
         let mut target = [Chunk::zeroed(); 3];
         (0..rows)
             .map(|row| {
@@ -208,25 +191,13 @@ mod tests {
                 (f32::from(red[ch]) * (1.0 - a) + f32::from(white[ch]) * a).round() as u8
             })
         };
-        for layers in feature::LAYER_COUNTS {
-            assert_eq!(
-                chosen(2, (2, 4), layers, pixel),
-                [(1, 0), (1, 0)],
-                "{layers} layers"
-            );
-        }
+        assert_eq!(chosen(2, (2, 4), pixel), [(1, 0), (1, 0)]);
     }
 
     /// Every shift of a flat patch scores the same, and only a strictly higher
     /// score displaces zero shift.
     #[test]
     fn a_flat_cell_keeps_zero_shift() {
-        for layers in feature::LAYER_COUNTS {
-            assert_eq!(
-                chosen(2, (2, 4), layers, |_| dye("cyan")),
-                [(0, 0), (0, 0)],
-                "{layers} layers"
-            );
-        }
+        assert_eq!(chosen(2, (2, 4), |_| dye("cyan")), [(0, 0), (0, 0)]);
     }
 }

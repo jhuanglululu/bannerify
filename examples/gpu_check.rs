@@ -3,8 +3,7 @@
 //!
 //! ```text
 //! cargo run --release --example gpu_check -- [--rows N] [-p TOP_N DUP ROUNDS]
-//!     [-R passes] [-k window] [-x exact] [-F weight] [-U weight]
-//!     [--feature-layers N] [-C candidates]
+//!     [-R passes] [-k window] [-x exact] [-F weight] [-U weight] [-C candidates]
 //!     [-t threshold] [--seed S] [--budget MIB] [--profile] [--no-cpu]
 //!     [--diff N] [--only CELL] [--image PATH]
 //! ```
@@ -43,7 +42,6 @@ mod check {
         refinement: RefinementConfig,
         feature_weight: f32,
         purity_weight: f32,
-        feature_layers: usize,
         seed: u64,
         budget: Option<usize>,
         profile: bool,
@@ -66,7 +64,6 @@ mod check {
             },
             feature_weight: 0.5,
             purity_weight: 0.0,
-            feature_layers: 3,
             seed: 0,
             budget: None,
             profile: false,
@@ -99,9 +96,6 @@ mod check {
                 "-t" => o.refinement.error_threshold = num(i + 1).parse().expect("-t F"),
                 "-F" => o.feature_weight = num(i + 1).parse().expect("-F F"),
                 "-U" => o.purity_weight = num(i + 1).parse().expect("-U F"),
-                "--feature-layers" => {
-                    o.feature_layers = num(i + 1).parse().expect("--feature-layers N")
-                }
                 "--seed" => o.seed = num(i + 1).parse().expect("--seed S"),
                 "--budget" => {
                     o.budget = Some(num(i + 1).parse::<usize>().expect("--budget MIB") << 20)
@@ -238,7 +232,6 @@ mod check {
             perturbations: o.perturbations,
             feature_weight: o.feature_weight,
             purity_weight: o.purity_weight,
-            feature_layers: o.feature_layers,
         };
 
         let t = Instant::now();
@@ -257,7 +250,7 @@ mod check {
             cells.iter().filter(|c| c.n_layers == 6).count(),
         );
         println!(
-            "config: -R {} -k {} -x {} -C {} -t {} -F {} -U {} --feature-layers {} -p {:?}",
+            "config: -R {} -k {} -x {} -C {} -t {} -F {} -U {} -p {:?}",
             o.refinement.refinement_pass,
             o.refinement.window_size,
             o.refinement.exact_candidates,
@@ -265,7 +258,6 @@ mod check {
             o.refinement.error_threshold,
             o.feature_weight,
             o.purity_weight,
-            o.feature_layers,
             o.perturbations
         );
 

@@ -71,19 +71,13 @@ layer_range = [4, 6]
 # perturbations = [0, 0, 0]
 
 # how hard the solver is pulled towards clean, flat dye colors
-# every cell is also fitted by an idealised banner of a few layers (see
-# feature_layers) drawn in pure dye colors, and this weighs that fit against
-# the real pixels: 0 ignores it entirely, 1 weighs it as heavily as the
-# target itself
+# every cell is also fitted by an idealised 2-layer banner drawn in pure dye
+# colors, and this weighs that fit against the real pixels: 0 ignores it
+# entirely, 1 weighs it as heavily as the target itself
 # raise it if flat areas and logos come out muddy, lower it for photographs
 # (A/B'd over 0/0.25/0.5/1.0: 0.5 cleans flat art decisively; 1.0 washes out
 #  gradients, so prefer 0-0.25 for photographic targets)
 feature_weight = 0.5
-
-# most layers of that idealised banner: 2, 3 or 4 (default 2)
-# more layers fit the image more closely; each step up takes more time, for
-# the feature map and for the shift choice (shift_range)
-feature_layers = 2
 
 # how strongly the solver prefers pure dye colors over mixes of them
 # every pixel is charged its distance to the nearest of the 16 dye colors,
