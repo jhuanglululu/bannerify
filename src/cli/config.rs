@@ -5,7 +5,7 @@
 //! [`fail`](crate::logger::fail)); each problem names the flag or the config
 //! key it came from, with the same wording for both.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::block;
+use crate::block_set::{self, Problem, Sets};
 use crate::cli::{Args, BackendChoice, OutputFormat};
 use crate::layout::{Dimension, ResizingMethod};
 use crate::logger::{Diagnostic, Kind, fail, warn};
@@ -44,7 +45,9 @@ pub struct Config {
     pub resizing_method: ResizingMethod,
     pub debug: bool,
     pub exclude_patterns: HashSet<String>,
-    pub exclude_blocks: HashSet<String>,
+    /// The block ids the background matcher may pick, sorted: the `--blocks`
+    /// selection with every set expanded.
+    pub blocks: Vec<String>,
     /// Largest dimension of the embedded preview images, or `None` for the
     /// input image's own size. Clamped to the wall either way
     /// ([`crate::preview::dimensions`]).
@@ -98,7 +101,8 @@ pub struct ConfigToml {
     pub stretch: Option<bool>,
     pub fill: Option<String>,
     pub exclude_patterns: Option<Vec<String>>,
-    pub exclude_blocks: Option<Vec<String>>,
+    pub blocks: Option<Vec<String>>,
+    pub block_sets: Option<BTreeMap<String, Vec<String>>>,
     pub layer_range: Option<Vec<usize>>,
     pub refinement_pass: Option<usize>,
     pub window_size: Option<usize>,
@@ -202,16 +206,14 @@ impl From<Args> for Config {
             "pattern",
             "patterns",
         );
-        let exclude_blocks = c.exclude(
+        let blocks = c.blocks(
             pick(
-                args.exclude_blocks.map(split_ids),
-                "--exclude-blocks",
-                config.exclude_blocks,
-                "exclude_blocks",
+                args.blocks.map(split_ids),
+                "--blocks",
+                config.blocks,
+                "blocks",
             ),
-            &block::ids(),
-            "block",
-            "blocks",
+            config.block_sets.unwrap_or_default(),
         );
         let backend = args.backend.or(config.backend).unwrap_or_default();
         let gpu_memory = pick(
@@ -276,7 +278,7 @@ impl From<Args> for Config {
             resizing_method,
             debug: args.debug,
             exclude_patterns,
-            exclude_blocks,
+            blocks,
             preview: preview.map(|(p, _)| p),
             render: args.render.or(config.render),
             n_layers: n_layers.unwrap_or(DEFAULT_LAYERS),
@@ -332,7 +334,7 @@ impl Config {
             "seed": self.seed,
             "workers": workers,
             "exclude_patterns": sorted(&self.exclude_patterns),
-            "exclude_blocks": sorted(&self.exclude_blocks),
+            "blocks": self.blocks,
             "preview": self.preview,
             "backend": backend,
             "gpu_memory": (backend == "gpu").then_some(self.gpu_memory),
@@ -737,6 +739,95 @@ impl Checker {
                 );
             }
         }
+    }
+
+    /// Resolve the block selection to the ids the matcher may pick.
+    ///
+    /// Only the ids the selection ends up with must have a texture, so `-id`
+    /// after a set that names a missing block is the way to drop it. A custom
+    /// set may not take the name of a block or of a built-in set, because a
+    /// name in a selection would then mean two things.
+    fn blocks(
+        &mut self,
+        selection: Option<(Vec<String>, Origin)>,
+        mut custom: BTreeMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let valid = block::ids();
+        let builtin = block_set::builtin();
+        let sets_key = Origin::Key("block_sets");
+        custom.retain(|name, _| {
+            let taken = if valid.contains(name) {
+                "a block id"
+            } else if builtin.contains_key(name) {
+                "a built-in block set"
+            } else if name.is_empty() || name.starts_with('-') {
+                "not a usable name (it is empty or starts with '-')"
+            } else {
+                return true;
+            };
+            let message = format!(
+                "block set '{name}' in '{}' cannot be defined: '{name}' is {taken}",
+                self.config_path
+            );
+            let d = self.diag(Kind::InvalidValue, sets_key, message).value(name);
+            self.errors.push(d);
+            false
+        });
+        let sets = Sets::new(custom);
+
+        let (entries, origin) = selection.unwrap_or_else(|| {
+            (
+                vec![block_set::DEFAULT.to_string()],
+                Origin::Flag("--blocks"),
+            )
+        });
+        let selected = match sets.resolve(&entries) {
+            Ok(selected) => selected,
+            Err(problem) => {
+                let message = match problem {
+                    Problem::Cycle(path) => format!(
+                        "{} names a block set that contains itself: {}",
+                        self.name(origin),
+                        path.join(" -> ")
+                    ),
+                    Problem::EmptyEntry => format!(
+                        "{} has an entry with no block or set name",
+                        self.name(origin)
+                    ),
+                };
+                let d = self.diag(Kind::InvalidValue, origin, message);
+                self.errors.push(d);
+                return Vec::new();
+            }
+        };
+
+        let names: Vec<String> = valid.iter().chain(sets.names()).cloned().collect();
+        for (id, set) in selected.iter().filter(|(id, _)| !valid.contains(id)) {
+            let message = match set {
+                Some(set) => format!("unknown block id '{id}' in block set '{set}'"),
+                None => format!("unknown block id '{id}'"),
+            };
+            let d = self
+                .diag(Kind::UnknownId, origin, message)
+                .value(id)
+                .suggestions(suggest(id, &names))
+                .hint(
+                    "run `bannerify --list blocks` for every valid id and \
+                     `bannerify --list sets` for the built-in sets",
+                );
+            self.errors.push(d);
+        }
+        if selected.is_empty() {
+            let message = format!(
+                "{} selects no block; at least one must remain",
+                self.name(origin)
+            );
+            let d = self
+                .diag(Kind::InvalidValue, origin, message)
+                .hint("a selection starts empty: begin with a set, e.g. 'default,-beacon'");
+            self.errors.push(d);
+        }
+        selected.into_keys().collect()
     }
 
     /// An excluded id that names nothing is a user mistake, not a silent

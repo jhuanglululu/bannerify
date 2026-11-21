@@ -59,7 +59,7 @@ pub enum Kind {
     Conflict,
     /// A required option is absent.
     Missing,
-    /// An excluded pattern or block id names nothing.
+    /// An excluded pattern id or a selected block id names nothing.
     UnknownId,
     /// The config file is missing, unreadable or not valid TOML.
     ConfigError,

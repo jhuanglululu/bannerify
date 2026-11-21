@@ -30,8 +30,6 @@
 //! 16, so they are [`Chunk`] sizes as they stand and no remainder path appears
 //! anywhere.
 
-use std::collections::HashSet;
-
 use image::GenericImageView;
 use rayon::prelude::*;
 use rust_embed::Embed;
@@ -170,15 +168,13 @@ pub fn ids() -> Vec<String> {
     all
 }
 
-/// Decode the embedded blocks, dropping every id in `exclude`.
+/// Decode the embedded blocks named by `selected`.
 ///
-/// `exclude` has already been checked against [`ids`] by the config
-/// validation, which also refuses to exclude every block.
-pub fn load(exclude: &HashSet<String>) -> Blocks {
-    let names: Vec<String> = ids()
-        .into_iter()
-        .filter(|id| !exclude.contains(id))
-        .collect();
+/// `selected` is the resolved `--blocks` selection: sorted, never empty, and
+/// already checked against [`ids`] by the config validation. The order is the
+/// table order, and therefore every distance tie-break.
+pub fn load(selected: &[String]) -> Blocks {
+    let names: Vec<String> = selected.to_vec();
 
     // One shared plan for the 16 → 24 upscale: same source geometry, same
     // target size for every block, so the weight tables are built once.

@@ -5,6 +5,7 @@ static ALLOCATOR: memory::Tracking = memory::Tracking;
 
 pub mod app;
 pub mod block;
+pub mod block_set;
 pub mod cli;
 pub mod color;
 pub mod export;

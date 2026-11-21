@@ -31,6 +31,8 @@ pub enum OutputFormat {
 pub enum ListKind {
     Patterns,
     Blocks,
+    /// The built-in block sets --blocks can name; --json adds their blocks
+    Sets,
     Dyes,
     /// The solver backends that can run on this machine
     Backends,
@@ -162,11 +164,13 @@ pub struct Args {
     #[arg(short = 'P', long, value_name = "PATTERNS")]
     pub exclude_patterns: Option<String>,
 
-    /// Block ids to exclude (comma-separated), e.g. 'beacon,ancient_debris';
-    /// the background matcher never picks an excluded block
+    /// Blocks the background matcher may pick [default: default, every
+    /// block]: block ids and block sets (comma-separated), applied left to
+    /// right; a leading '-' removes instead of adding, e.g.
+    /// 'default,-falling,-beacon' or 'wools,concretes,-black_wool'
     #[arg(help_heading = "Generation")]
-    #[arg(short = 'B', long, value_name = "BLOCKS")]
-    pub exclude_blocks: Option<String>,
+    #[arg(short = 'B', long, value_name = "BLOCKS", allow_hyphen_values = true)]
+    pub blocks: Option<String>,
 
     /// Layer Range: [MIN MAX] [default: 4 6]; flat cells get MIN layers, the
     /// busiest cell of the wall gets MAX

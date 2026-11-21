@@ -3,7 +3,7 @@
 //! with it.
 //!
 //! Ids are unprefixed Minecraft ids (namespace `minecraft:`), the same strings
-//! `--exclude-patterns`, `--exclude-blocks` and `--list` use. Banners are
+//! `--exclude-patterns`, `--blocks` and `--list` use. Banners are
 //! row-major; rows count from the top, columns from the left, 0-based. Banner
 //! `(r, c)` hangs on the face of block `(r, c)`, and the block grid is one row
 //! taller than the banner grid (see [`super::schematic`] for the build).

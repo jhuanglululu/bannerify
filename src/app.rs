@@ -28,6 +28,7 @@ use rayon::prelude::*;
 use serde_json::{Map, Value, json};
 
 use crate::block::{self, Blocks};
+use crate::block_set;
 use crate::cli::config::{Config, format_name};
 use crate::cli::{Args, BackendChoice, ListKind, OutputFormat};
 use crate::color::{COLOR_NAMES, NUM_COLORS};
@@ -571,6 +572,13 @@ fn list(kind: ListKind) {
                 .map(|id| json!({"id": id}))
                 .collect(),
         ),
+        ListKind::Sets => (
+            "sets",
+            block_set::builtin()
+                .into_iter()
+                .map(|(id, blocks)| json!({"id": id, "blocks": blocks}))
+                .collect(),
+        ),
         ListKind::Dyes => (
             "dyes",
             (0..NUM_COLORS)
@@ -698,7 +706,7 @@ fn run(config: &Config) {
     let items = col_items(&layout, &plan);
     let (patterns, blocks) = rayon::join(
         || pattern::load(&config.exclude_patterns),
-        || block::load(&config.exclude_blocks),
+        || block::load(&config.blocks),
     );
     let t_plan = t.elapsed();
 
