@@ -166,18 +166,40 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
 - `--fill COLOR`：用指定顏色填滿上下或左右的空白（`'#ff9453'`、
   `'9,4,87'`、`'rgb(114, 5, 14)'`）。
 
-### 排除項目
+### 選擇圖案與方塊
 
 ```sh
-bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debris
+bannerify input.jpg output.html --row 20 -P globe,mojang -B default,-falling,-beacon
 ```
 
 - `-P, --exclude-patterns`：求解器不可使用的旗幟圖案 ID（例如你無法合成
   的圖案）。
-- `-B, --exclude-blocks`：背景配對不可選用的方塊 ID。
+- `-B, --blocks`：背景可以使用的方塊（預設 `default`，也就是所有方塊）。
+  內容是以逗號分隔的方塊 ID 和方塊集合，由左到右套用；開頭加上 `-` 表示
+  移除該方塊或集合，而不是加入。清單一開始是空的，所以要先寫一個集合：
+  - `default,-falling,-beacon`：所有方塊，但不含會掉落的方塊（沙、礫石、
+    混凝土粉末）和烽火台。
+  - `wools,concretes,-black_wool`：兩個顏色系列，再去掉一個方塊。
 
-`bannerify --list patterns`（或 `blocks`、`dyes`、`backends`）會列出所有
-有效的 ID。
+內建的集合有 `default`、`wools`、`concretes`、`concrete_powders`、
+`terracottas`、`glazed_terracottas`、`logs`、`planks`、`ores`、`falling`
+和 `expensive`。設定檔可以在 `[block_sets]` 底下用同樣的寫法定義更多
+集合，之後就能在命令列用名稱指定：
+
+```toml
+[block_sets]
+quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]
+```
+
+```sh
+bannerify input.jpg output.html --row 20 -f config.toml -B quiet,-red_wool
+```
+
+既不是集合也不是方塊的 ID 會被視為錯誤，除非後面用 `-id` 把它移除。
+自訂集合不能使用方塊或內建集合的名稱。
+
+`bannerify --list patterns`（或 `blocks`、`sets`、`dyes`、`backends`）會
+列出所有有效的 ID；`--list sets --json` 還會列出每個集合包含的方塊。
 
 ### 其他輸出選項
 

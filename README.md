@@ -183,18 +183,42 @@ When the image's aspect ratio doesn't match the wall's:
 - `--fill COLOR` — letterbox with a color (`'#ff9453'`, `'9,4,87'`,
   `'rgb(114, 5, 14)'`).
 
-### Excluding things
+### Choosing patterns and blocks
 
 ```sh
-bannerify input.jpg output.html --row 20 -P globe,mojang -B beacon,ancient_debris
+bannerify input.jpg output.html --row 20 -P globe,mojang -B default,-falling,-beacon
 ```
 
 - `-P, --exclude-patterns` — banner pattern ids the solver may not use
   (e.g. patterns you can't craft).
-- `-B, --exclude-blocks` — block ids the background matcher may not pick.
+- `-B, --blocks` — the blocks the background may be built from (default
+  `default`, every block). It is a comma-separated list of block ids and
+  block sets, applied left to right; a leading `-` removes a block or a set
+  instead of adding it. The list starts empty, so begin with a set:
+  - `default,-falling,-beacon` — everything except the blocks that fall
+    (sand, gravel, concrete powder) and the beacon.
+  - `wools,concretes,-black_wool` — two color families, minus one block.
 
-`bannerify --list patterns` (or `blocks`, `dyes`, `backends`) prints every
-valid id.
+The built-in sets are `default`, `wools`, `concretes`, `concrete_powders`,
+`terracottas`, `glazed_terracottas`, `logs`, `planks`, `ores`, `falling` and
+`expensive`. A config file can define more under `[block_sets]`, written
+the same way, and they can then be named on the command line:
+
+```toml
+[block_sets]
+quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]
+```
+
+```sh
+bannerify input.jpg output.html --row 20 -f config.toml -B quiet,-red_wool
+```
+
+An id that is neither a set nor a block is an error, unless a later `-id`
+removes it again. A custom set cannot take the name of a block or of a
+built-in set.
+
+`bannerify --list patterns` (or `blocks`, `sets`, `dyes`, `backends`) prints
+every valid id; `--list sets --json` also prints the blocks of each set.
 
 ### Output extras
 

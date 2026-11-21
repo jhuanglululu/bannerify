@@ -59,8 +59,11 @@ stretch = false
 # patterns in the list will not be used
 exclude_patterns = []
 
-# blocks in the list will not be used when generating background
-exclude_blocks = []
+# blocks the background may be built from: block ids and block sets, applied
+# left to right; a leading '-' removes a block or a set instead of adding it
+# "default" is every block; `bannerify --list sets` prints the other sets
+# e.g. ["default", "-falling", "-beacon"] or ["wools", "concretes"]
+blocks = ["default"]
 
 # MIN and MAX number of layers that a banner can have
 # simpler image chunks will use less layers
@@ -139,3 +142,13 @@ refinement_candidate = 5
 # 0 turns it off: much faster, noticeably worse
 # 8 is the knee of the curve; above 20 the returns are tiny
 exact_candidates = 20
+
+# * Block Sets *
+
+# your own block sets, usable by name in `blocks` above and in --blocks
+# a set is written like `blocks`: ids and other sets, '-' to remove
+# a set cannot take the name of a block or of a built-in set
+# this table has to stay at the end of the file: in TOML every key below a
+# [table] header belongs to that table
+[block_sets]
+# quiet = ["wools", "concretes", "-black_wool", "smooth_stone"]
