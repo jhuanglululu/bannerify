@@ -129,7 +129,6 @@ fn order((x, y): (usize, usize)) -> Vec<(isize, isize)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
 
     use super::*;
     use crate::color::{COLOR_NAMES, COLORS_RGB};
@@ -155,7 +154,7 @@ mod tests {
         let band = Plan::new(w, h, w, h).columns(0..w).resample(&image);
         let view = BandView::new(Some(&band), 0, 0, [0; 3]);
 
-        let patterns = load(&HashSet::new());
+        let patterns = load(&crate::pattern::ids());
         let mut search = ShiftSearch::new(range);
         let mut target = [Chunk::zeroed(); 3];
         (0..rows)
@@ -178,7 +177,7 @@ mod tests {
     /// so the tie goes to `dy = 0`.
     #[test]
     fn a_banner_one_pixel_off_its_pattern_edge_picks_the_matching_shift() {
-        let patterns = load(&HashSet::new());
+        let patterns = load(&crate::pattern::ids());
         let stripe = &patterns.top[patterns
             .names
             .iter()

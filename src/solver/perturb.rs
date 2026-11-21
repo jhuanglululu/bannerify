@@ -170,7 +170,6 @@ pub(crate) fn reroll(layers: &mut [(usize, usize)], n_patterns: usize, rng: &mut
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
 
     use super::*;
     use crate::geometry::TOP_HW;
@@ -183,7 +182,7 @@ mod tests {
     /// perturbation at all (no draws), on both patch sizes.
     #[test]
     fn skip_leaves_the_stream_where_a_solve_leaves_it() {
-        let patterns = load(&HashSet::new());
+        let patterns = load(&crate::pattern::ids());
         let refinement = RefinementConfig {
             refinement_pass: 1,
             window_size: 2,

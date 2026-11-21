@@ -13,8 +13,6 @@
 //! *tail* of the same plane — only `Σ α²`, which sums over exactly the solved
 //! pixels, differs between the two cases and so is stored twice.
 
-use std::collections::HashSet;
-
 use image::GenericImageView;
 use rayon::prelude::*;
 use rust_embed::Embed;
@@ -64,15 +62,13 @@ pub fn ids() -> Vec<String> {
     all
 }
 
-/// Decode the embedded patterns, dropping every id in `exclude`.
+/// Decode the embedded patterns named by `selected`.
 ///
-/// `exclude` has already been checked against [`ids`] by the config
-/// validation, which also refuses to exclude every pattern.
-pub fn load(exclude: &HashSet<String>) -> Patterns {
-    let names: Vec<String> = ids()
-        .into_iter()
-        .filter(|id| !exclude.contains(id))
-        .collect();
+/// `selected` is the resolved `--patterns` selection: sorted, never empty,
+/// and already checked against [`ids`] by the config validation. The order is
+/// the pattern index order, and therefore every tie-break in the solver.
+pub fn load(selected: &[String]) -> Patterns {
+    let names: Vec<String> = selected.to_vec();
 
     let decoded: Vec<Chunk<TOP_HW>> = names.par_iter().map(|id| decode(id)).collect();
 

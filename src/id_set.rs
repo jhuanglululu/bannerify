@@ -1,5 +1,5 @@
-//! Block sets: named groups of block ids, and the `--blocks` selection that
-//! is written in terms of them.
+//! Id sets: named groups of block ids or of pattern ids, and the `--blocks`
+//! and `--patterns` selections that are written in terms of them.
 //!
 //! A selection is a list of entries applied left to right. An entry names a
 //! set or a block id and adds it; with a leading `-` it removes it instead:
@@ -10,19 +10,37 @@
 //! ```
 //!
 //! A set is itself such a list, so a custom set from the config file may name
-//! other sets and remove from them. A name that is not a set is taken as a
-//! block id without being checked here: whether an id has a texture is only
+//! other sets and remove from them. A name that is not a set is taken as an
+//! id without being checked here: whether an id has an embedded asset is only
 //! asked of the ids the whole selection ends up with (see
-//! [`Checker::blocks`](crate::cli::config)), so removing an id also removes
+//! [`Checker::select`](crate::cli::config)), so removing an id also removes
 //! the complaint about it.
+//!
+//! Blocks and patterns have separate sets; the syntax is the same.
 
 use std::collections::BTreeMap;
 
 use crate::block;
 use crate::color::COLOR_NAMES;
+use crate::pattern;
 
-/// The set a selection starts from when none is given: every embedded block.
+/// The set a selection starts from when none is given: every embedded id.
 pub const DEFAULT: &str = "default";
+
+/// The patterns a loom only offers with a banner pattern item in its pattern
+/// slot; every other pattern needs nothing but dye.
+pub const ITEM_PATTERNS: [&str; 10] = [
+    "bricks",
+    "creeper",
+    "curly_border",
+    "flow",
+    "flower",
+    "globe",
+    "guster",
+    "mojang",
+    "piglin",
+    "skull",
+];
 
 /// Why a selection could not be resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,7 +51,7 @@ pub enum Problem {
     EmptyEntry,
 }
 
-/// The blocks a selection ends up with: each id, and the set that named it
+/// The ids a selection ends up with: each id, and the set that named it
 /// (`None` when the selection named the id itself).
 pub type Selection = BTreeMap<String, Option<String>>;
 
@@ -44,10 +62,13 @@ pub struct Sets {
 }
 
 impl Sets {
-    /// The built-in sets plus `custom`. The caller has already refused custom
-    /// names that collide with a built-in set or a block id.
-    pub fn new(custom: BTreeMap<String, Vec<String>>) -> Self {
-        let mut sets = builtin();
+    /// The built-in sets of one kind plus `custom`. The caller has already
+    /// refused custom names that collide with a built-in set or an id.
+    pub fn new(
+        builtin: BTreeMap<String, Vec<String>>,
+        custom: BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        let mut sets = builtin;
         sets.extend(custom);
         Self { sets }
     }
@@ -110,9 +131,24 @@ impl Sets {
     }
 }
 
-/// The built-in sets, by name. [`DEFAULT`] is every embedded block; the rest
-/// are fixed lists.
-pub fn builtin() -> BTreeMap<String, Vec<String>> {
+/// The built-in pattern sets, by name: [`DEFAULT`], every embedded pattern,
+/// and `dye_only`, the same without [`ITEM_PATTERNS`].
+pub fn pattern_sets() -> BTreeMap<String, Vec<String>> {
+    let all = pattern::ids();
+    let dye_only = all
+        .iter()
+        .filter(|id| !ITEM_PATTERNS.contains(&id.as_str()))
+        .cloned()
+        .collect();
+    BTreeMap::from([
+        (DEFAULT.to_string(), all),
+        ("dye_only".to_string(), dye_only),
+    ])
+}
+
+/// The built-in block sets, by name. [`DEFAULT`] is every embedded block; the
+/// rest are fixed lists.
+pub fn block_sets() -> BTreeMap<String, Vec<String>> {
     let dyed = |suffix: &str| -> Vec<String> {
         COLOR_NAMES
             .iter()
@@ -186,25 +222,39 @@ mod tests {
         selection.keys().map(String::as_str).collect()
     }
 
-    /// A built-in set that names a block with no texture is only reported when
+    /// A built-in set that names an id with no asset is only reported when
     /// someone selects that set, so it is checked here for all of them; a set
-    /// that shares a name with a block would make that block unselectable.
+    /// that shares a name with an id would make that id unselectable.
     #[test]
-    fn builtin_sets_name_only_embedded_blocks_and_no_block_id() {
-        let blocks = block::ids();
-        for (name, members) in builtin() {
-            assert!(!blocks.contains(&name), "set '{name}' is also a block id");
-            assert!(!members.is_empty(), "set '{name}' is empty");
-            for id in members {
-                assert!(blocks.contains(&id), "set '{name}' names unknown '{id}'");
+    fn builtin_sets_name_only_embedded_ids_and_no_id() {
+        for (ids, sets) in [
+            (block::ids(), block_sets()),
+            (pattern::ids(), pattern_sets()),
+        ] {
+            for (name, members) in sets {
+                assert!(!ids.contains(&name), "set '{name}' is also an id");
+                assert!(!members.is_empty(), "set '{name}' is empty");
+                for id in members {
+                    assert!(ids.contains(&id), "set '{name}' names unknown '{id}'");
+                }
             }
         }
+    }
+
+    /// A misspelt item pattern would stay in `dye_only` without any error.
+    #[test]
+    fn dye_only_leaves_out_exactly_the_item_patterns() {
+        let sets = pattern_sets();
+        assert_eq!(
+            sets["dye_only"].len() + ITEM_PATTERNS.len(),
+            sets[DEFAULT].len()
+        );
     }
 
     #[test]
     fn entries_apply_left_to_right() {
         let custom = BTreeMap::from([("pair".to_string(), strings(&["sand", "gravel"]))]);
-        let sets = Sets::new(custom);
+        let sets = Sets::new(BTreeMap::new(), custom);
 
         let removed = sets.resolve(&strings(&["pair", "stone", "-sand"])).unwrap();
         assert_eq!(ids(&removed), ["gravel", "stone"]);
@@ -223,7 +273,9 @@ mod tests {
             ("inner".to_string(), strings(&["sand", "gravel", "typo"])),
             ("outer".to_string(), strings(&["inner", "-typo", "stone"])),
         ]);
-        let selection = Sets::new(custom).resolve(&strings(&["outer"])).unwrap();
+        let selection = Sets::new(BTreeMap::new(), custom)
+            .resolve(&strings(&["outer"]))
+            .unwrap();
         assert_eq!(
             selection,
             Selection::from([
@@ -241,7 +293,7 @@ mod tests {
             ("b".to_string(), strings(&["stone", "-a"])),
         ]);
         assert_eq!(
-            Sets::new(custom).resolve(&strings(&["a"])),
+            Sets::new(BTreeMap::new(), custom).resolve(&strings(&["a"])),
             Err(Problem::Cycle(strings(&["a", "b", "a"])))
         );
     }

@@ -399,7 +399,6 @@ pub(super) fn rebuild_prefixes(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
 
     use super::*;
     use crate::oklab::srgb_to_oklab;
@@ -459,7 +458,7 @@ mod tests {
     /// moves one of the two and not the other.
     #[test]
     fn a_zero_feature_weight_solves_exactly_as_the_pre_feature_map_solver() {
-        let patterns = load(&HashSet::new());
+        let patterns = load(&crate::pattern::ids());
         let refinement = refinement();
         let cfg = config(&patterns, &refinement);
 
@@ -526,7 +525,7 @@ mod tests {
     /// kernels.
     #[test]
     fn the_reported_error_is_pure_target_delta_e_at_a_non_zero_weight() {
-        let patterns = load(&HashSet::new());
+        let patterns = load(&crate::pattern::ids());
         let refinement = refinement();
         let cfg = SolveCfg {
             feature_weight: 0.75,

@@ -397,7 +397,6 @@ fn argmax_sub(a: &[f32], b: &[f32]) -> (usize, f32) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
 
     use super::*;
     use crate::color::COLOR_NAMES;
@@ -410,7 +409,7 @@ mod tests {
     const LAMBDA: f32 = 0.5;
 
     fn patterns() -> Patterns {
-        load(&HashSet::new())
+        load(&crate::pattern::ids())
     }
 
     fn index_of(pats: &Patterns, name: &str) -> usize {

@@ -31,8 +31,10 @@ pub enum OutputFormat {
 pub enum ListKind {
     Patterns,
     Blocks,
+    /// The built-in pattern sets --patterns can name; --json adds their patterns
+    PatternSets,
     /// The built-in block sets --blocks can name; --json adds their blocks
-    Sets,
+    BlockSets,
     Dyes,
     /// The solver backends that can run on this machine
     Backends,
@@ -158,11 +160,14 @@ pub struct Args {
     #[arg(long, value_name = "COLOR")]
     pub fill: Option<String>,
 
-    /// Pattern ids to exclude (comma-separated), e.g. 'globe,mojang'; the
-    /// solver never lays an excluded pattern
+    /// Patterns the solver may lay [default: default, every pattern]:
+    /// pattern ids and pattern sets (comma-separated), applied left to
+    /// right; a leading '-' removes instead of adding, e.g.
+    /// 'default,-globe,-mojang', or 'dye_only' for the patterns that need
+    /// no banner pattern item
     #[arg(help_heading = "Generation")]
-    #[arg(short = 'P', long, value_name = "PATTERNS")]
-    pub exclude_patterns: Option<String>,
+    #[arg(short = 'P', long, value_name = "PATTERNS", allow_hyphen_values = true)]
+    pub patterns: Option<String>,
 
     /// Blocks the background matcher may pick [default: default, every
     /// block]: block ids and block sets (comma-separated), applied left to

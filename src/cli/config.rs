@@ -5,7 +5,7 @@
 //! [`fail`](crate::logger::fail)); each problem names the flag or the config
 //! key it came from, with the same wording for both.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +13,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::block;
-use crate::block_set::{self, Problem, Sets};
 use crate::cli::{Args, BackendChoice, OutputFormat};
+use crate::id_set::{self, Problem, Sets};
 use crate::layout::{Dimension, ResizingMethod};
 use crate::logger::{Diagnostic, Kind, fail, warn};
 use crate::pattern;
@@ -44,7 +44,9 @@ pub struct Config {
     pub workers: Option<usize>,
     pub resizing_method: ResizingMethod,
     pub debug: bool,
-    pub exclude_patterns: HashSet<String>,
+    /// The pattern ids the solver may lay, sorted: the `--patterns` selection
+    /// with every set expanded.
+    pub patterns: Vec<String>,
     /// The block ids the background matcher may pick, sorted: the `--blocks`
     /// selection with every set expanded.
     pub blocks: Vec<String>,
@@ -100,7 +102,8 @@ pub struct ConfigToml {
     pub fit: Option<bool>,
     pub stretch: Option<bool>,
     pub fill: Option<String>,
-    pub exclude_patterns: Option<Vec<String>>,
+    pub patterns: Option<Vec<String>>,
+    pub pattern_sets: Option<BTreeMap<String, Vec<String>>>,
     pub blocks: Option<Vec<String>>,
     pub block_sets: Option<BTreeMap<String, Vec<String>>>,
     pub layer_range: Option<Vec<usize>>,
@@ -195,18 +198,30 @@ impl From<Args> for Config {
         };
         let preview = pick(args.preview, "--preview", config.preview, "preview");
         c.preview(preview);
-        let exclude_patterns = c.exclude(
+        let patterns = c.select(
+            &Selectable {
+                noun: "pattern",
+                flag: "--patterns",
+                sets_key: "pattern_sets",
+                ids: pattern::ids(),
+                builtin: id_set::pattern_sets(),
+            },
             pick(
-                args.exclude_patterns.map(split_ids),
-                "--exclude-patterns",
-                config.exclude_patterns,
-                "exclude_patterns",
+                args.patterns.map(split_ids),
+                "--patterns",
+                config.patterns,
+                "patterns",
             ),
-            &pattern::ids(),
-            "pattern",
-            "patterns",
+            config.pattern_sets.unwrap_or_default(),
         );
-        let blocks = c.blocks(
+        let blocks = c.select(
+            &Selectable {
+                noun: "block",
+                flag: "--blocks",
+                sets_key: "block_sets",
+                ids: block::ids(),
+                builtin: id_set::block_sets(),
+            },
             pick(
                 args.blocks.map(split_ids),
                 "--blocks",
@@ -222,13 +237,7 @@ impl From<Args> for Config {
             config.gpu_memory,
             "gpu_memory",
         );
-        c.gpu_memory(
-            gpu_memory,
-            backend,
-            pattern::ids().len().saturating_sub(exclude_patterns.len()),
-            &refinement,
-            n_layers,
-        );
+        c.gpu_memory(gpu_memory, backend, patterns.len(), &refinement, n_layers);
 
         if !c.errors.is_empty() {
             fail(c.errors);
@@ -277,7 +286,7 @@ impl From<Args> for Config {
             workers: args.workers.or(config.workers),
             resizing_method,
             debug: args.debug,
-            exclude_patterns,
+            patterns,
             blocks,
             preview: preview.map(|(p, _)| p),
             render: args.render.or(config.render),
@@ -310,11 +319,6 @@ impl Config {
             Dimension::Row(r) => (Some(r), None),
             Dimension::Column(c) => (None, Some(c)),
         };
-        fn sorted(set: &HashSet<String>) -> Vec<&str> {
-            let mut ids: Vec<&str> = set.iter().map(String::as_str).collect();
-            ids.sort_unstable();
-            ids
-        }
         json!({
             "row": row,
             "columns": columns,
@@ -333,7 +337,7 @@ impl Config {
             "perturbations": self.perturbations.map(|(t, d, r)| [t, d, r]),
             "seed": self.seed,
             "workers": workers,
-            "exclude_patterns": sorted(&self.exclude_patterns),
+            "patterns": self.patterns,
             "blocks": self.blocks,
             "preview": self.preview,
             "backend": backend,
@@ -741,57 +745,54 @@ impl Checker {
         }
     }
 
-    /// Resolve the block selection to the ids the matcher may pick.
+    /// Resolve a `--blocks` or `--patterns` selection to the ids it ends up
+    /// with, sorted.
     ///
-    /// Only the ids the selection ends up with must have a texture, so `-id`
-    /// after a set that names a missing block is the way to drop it. A custom
-    /// set may not take the name of a block or of a built-in set, because a
-    /// name in a selection would then mean two things.
-    fn blocks(
+    /// Only those ids must have an embedded asset, so `-id` after a set that
+    /// names a missing id is the way to drop it. A custom set may not take the
+    /// name of an id or of a built-in set, because a name in a selection would
+    /// then mean two things.
+    fn select(
         &mut self,
+        what: &Selectable,
         selection: Option<(Vec<String>, Origin)>,
         mut custom: BTreeMap<String, Vec<String>>,
     ) -> Vec<String> {
-        let valid = block::ids();
-        let builtin = block_set::builtin();
-        let sets_key = Origin::Key("block_sets");
+        let noun = what.noun;
+        let sets_key = Origin::Key(what.sets_key);
         custom.retain(|name, _| {
-            let taken = if valid.contains(name) {
-                "a block id"
-            } else if builtin.contains_key(name) {
-                "a built-in block set"
+            let taken = if what.ids.contains(name) {
+                format!("a {noun} id")
+            } else if what.builtin.contains_key(name) {
+                format!("a built-in {noun} set")
             } else if name.is_empty() || name.starts_with('-') {
-                "not a usable name (it is empty or starts with '-')"
+                "not a usable name (it is empty or starts with '-')".to_string()
             } else {
                 return true;
             };
             let message = format!(
-                "block set '{name}' in '{}' cannot be defined: '{name}' is {taken}",
+                "{noun} set '{name}' in '{}' cannot be defined: '{name}' is {taken}",
                 self.config_path
             );
             let d = self.diag(Kind::InvalidValue, sets_key, message).value(name);
             self.errors.push(d);
             false
         });
-        let sets = Sets::new(custom);
+        let sets = Sets::new(what.builtin.clone(), custom);
 
-        let (entries, origin) = selection.unwrap_or_else(|| {
-            (
-                vec![block_set::DEFAULT.to_string()],
-                Origin::Flag("--blocks"),
-            )
-        });
+        let (entries, origin) = selection
+            .unwrap_or_else(|| (vec![id_set::DEFAULT.to_string()], Origin::Flag(what.flag)));
         let selected = match sets.resolve(&entries) {
             Ok(selected) => selected,
             Err(problem) => {
                 let message = match problem {
                     Problem::Cycle(path) => format!(
-                        "{} names a block set that contains itself: {}",
+                        "{} names a {noun} set that contains itself: {}",
                         self.name(origin),
                         path.join(" -> ")
                     ),
                     Problem::EmptyEntry => format!(
-                        "{} has an entry with no block or set name",
+                        "{} has an entry with no {noun} or set name",
                         self.name(origin)
                     ),
                 };
@@ -801,72 +802,47 @@ impl Checker {
             }
         };
 
-        let names: Vec<String> = valid.iter().chain(sets.names()).cloned().collect();
-        for (id, set) in selected.iter().filter(|(id, _)| !valid.contains(id)) {
+        let names: Vec<String> = what.ids.iter().chain(sets.names()).cloned().collect();
+        for (id, set) in selected.iter().filter(|(id, _)| !what.ids.contains(id)) {
             let message = match set {
-                Some(set) => format!("unknown block id '{id}' in block set '{set}'"),
-                None => format!("unknown block id '{id}'"),
+                Some(set) => format!("unknown {noun} id '{id}' in {noun} set '{set}'"),
+                None => format!("unknown {noun} id '{id}'"),
             };
             let d = self
                 .diag(Kind::UnknownId, origin, message)
                 .value(id)
                 .suggestions(suggest(id, &names))
-                .hint(
-                    "run `bannerify --list blocks` for every valid id and \
-                     `bannerify --list sets` for the built-in sets",
-                );
+                .hint(format!(
+                    "run `bannerify --list {noun}s` for every valid id and \
+                     `bannerify --list {noun}-sets` for the built-in sets"
+                ));
             self.errors.push(d);
         }
         if selected.is_empty() {
             let message = format!(
-                "{} selects no block; at least one must remain",
+                "{} selects no {noun}; at least one must remain",
                 self.name(origin)
             );
             let d = self
                 .diag(Kind::InvalidValue, origin, message)
-                .hint("a selection starts empty: begin with a set, e.g. 'default,-beacon'");
+                .hint("a selection starts empty: begin with a set, e.g. 'default,-some_id'");
             self.errors.push(d);
         }
         selected.into_keys().collect()
     }
+}
 
-    /// An excluded id that names nothing is a user mistake, not a silent
-    /// no-op; excluding every id leaves the solver nothing to work with.
-    fn exclude(
-        &mut self,
-        value: Option<(Vec<String>, Origin)>,
-        valid: &[String],
-        noun: &str,
-        list: &str,
-    ) -> HashSet<String> {
-        let Some((ids, origin)) = value else {
-            return HashSet::new();
-        };
-        let ids: HashSet<String> = ids.into_iter().collect();
-
-        let mut unknown: Vec<&String> = ids.iter().filter(|id| !valid.contains(id)).collect();
-        unknown.sort_unstable();
-        for id in unknown {
-            let d = self
-                .diag(Kind::UnknownId, origin, format!("unknown {noun} id '{id}'"))
-                .value(id)
-                .suggestions(suggest(id, valid))
-                .hint(format!("run `bannerify --list {list}` for every valid id"));
-            self.errors.push(d);
-        }
-        if valid.iter().all(|id| ids.contains(id)) {
-            let d = self.diag(
-                Kind::InvalidValue,
-                origin,
-                format!(
-                    "{} excludes every {noun}; at least one must remain",
-                    self.name(origin)
-                ),
-            );
-            self.errors.push(d);
-        }
-        ids
-    }
+/// One kind of id a selection can be made of: blocks or patterns.
+struct Selectable {
+    /// `"block"` or `"pattern"`; `--list {noun}s` and `--list {noun}-sets`
+    /// are the listings the hints point at.
+    noun: &'static str,
+    flag: &'static str,
+    /// The config key of the custom sets.
+    sets_key: &'static str,
+    /// Every id with an embedded asset.
+    ids: Vec<String>,
+    builtin: BTreeMap<String, Vec<String>>,
 }
 
 /// Up to three valid ids close to a mistyped one, closest first. "Close" is

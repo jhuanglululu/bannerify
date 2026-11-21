@@ -19,7 +19,6 @@ fn main() {
 }
 
 mod check {
-    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     use rayon::prelude::*;
@@ -229,7 +228,7 @@ mod check {
 
     pub fn main() {
         let o = parse();
-        let patterns = pattern::load(&HashSet::new());
+        let patterns = pattern::load(&pattern::ids());
         let cfg = SolveCfg {
             patterns: &patterns,
             refinement: &o.refinement,

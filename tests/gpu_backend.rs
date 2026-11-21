@@ -1,7 +1,5 @@
 //! The GPU backend against the CPU solver, on the same prepared cells.
 
-use std::collections::HashSet;
-
 use bannerify::cli::config::RefinementConfig;
 use bannerify::geometry::TOP_HW;
 use bannerify::gpu::GpuBackend;
@@ -76,7 +74,7 @@ fn the_gpu_backend_matches_the_cpu_solver_in_quality() {
             return;
         }
     };
-    let patterns = pattern::load(&HashSet::new());
+    let patterns = pattern::load(&pattern::ids());
     let cells = cells();
 
     let cases = [
