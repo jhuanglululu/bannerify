@@ -82,21 +82,26 @@ feature_weight = 0.5
 # how strongly the solver prefers pure dye colors over mixes of them
 # every pixel is charged its distance to the nearest of the 16 dye colors,
 # times this weight; 0 (the default) turns it off
-# it penalises photographic shades, so expect a higher error on photographs
+# around 0.25 with feature_weight = 0 it cleans flat areas; from 0.5 up, a
+# color between two dyes moves to one of them, which can be the wrong hue
+# it penalizes photographic shades, so expect a higher error on photographs
 purity_weight = 0
 
-# how strongly the solver keeps edges where the image has them and nowhere else
-# every pair of neighbouring pixels whose difference does not match the
+# removes pattern texture from areas the image shows as flat
+# every pair of neighboring pixels whose difference does not match the
 # image's difference is charged the mismatch, times this weight; 0 (the
 # default) turns it off
-# an edge one pixel off is charged twice (once for the missing edge, once for
-# the extra one), so pair it with shift_range
+# works best with feature_weight = 0: try 0.5 on logos and flags
+# it does not sharpen edges, and above 1 a pattern edge a pixel away from the
+# image's edge is charged enough that the banner may lose the edge
 gradient_weight = 0
 
 # per-banner shift: [X, Y]
 # each banner may be solved against the image moved up to X pixels sideways
 # and Y pixels up or down, whichever lets a clean banner fit best; [0, 0] (the
 # default) turns it off. X can be at most 2 and Y at most 4
+# [1, 1] straightens horizontal and vertical edges; larger ranges turn
+# diagonals and curves into steps and take longer
 # the banner is still drawn at its real position, and the reported error is
 # measured against the unmoved image, so the reported error rises
 shift_range = [0, 0]

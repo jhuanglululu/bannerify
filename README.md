@@ -146,21 +146,27 @@ bannerify input.jpg output.html --row 40 -p 3 4 2
   by an idealised two-layer banner in pure dye colors, and λ weighs that
   fit against the raw pixels. Raise it when logos and flat areas come out
   muddy, lower it (or `0`) for photographs.
+- `-G, --gradient-weight μ` — removes pattern texture from areas the image
+  shows as flat (default `0`, off). Every pair of neighboring pixels whose
+  difference does not match the image's is charged the mismatch, times μ.
+  It keeps the colors the solver would otherwise pick. It works best with
+  the feature weight off: try `-F 0 -G 0.5` on logos and flags. It does not
+  sharpen edges, and above `1` a pattern edge that sits a pixel away from
+  the image's edge is charged enough that the banner may lose the edge.
 - `-U, --purity-weight ν` — how strongly the solver prefers pure dye
   colors over mixes of them (default `0`, off). Every pixel is charged its
   distance to the nearest of the 16 dye colors, times ν, so a banner drawn
   in clean dye colors beats one whose blends average to the right shade.
-  It penalises photographic shades, so expect a higher error on photographs.
-- `-G, --gradient-weight μ` — how strongly the solver keeps edges where the
-  image has them and nowhere else (default `0`, off). Every pair of
-  neighbouring pixels whose difference does not match the image's is
-  charged the mismatch, times μ. An edge one pixel off is charged twice,
-  once where it is missing and once where it is extra, so use it together
-  with `--shift-range`.
+  Around `0.25` with `-F 0` it cleans flat areas; from `0.5` up, a color
+  that lies between two dyes moves to one of them, which can be the wrong
+  hue. It penalizes photographic shades, so expect a higher error on
+  photographs.
 - `-S, --shift-range X Y` — lets each banner be solved against the image
   moved by up to `X` pixels sideways (at most `2`) and `Y` up or down (at
   most `4`), whichever position a clean banner fits best (default `0 0`,
-  off). Use it when image edges fall just beside the pattern edges. The
+  off). `1 1` straightens horizontal and vertical edges that fall just
+  beside a pattern edge; larger ranges turn diagonals and curves into steps
+  and take longer, because every position is searched for every banner. The
   banner is still drawn at its real position, and the reported error is
   measured against the unmoved image, so the reported error rises.
 - `-s, --seed N` — perturbation is deterministic per seed; try a few seeds

@@ -193,16 +193,15 @@ pub struct Args {
     /// Weight of the purity term: [default: 0, off]. Every pixel is charged its
     /// distance to the nearest pure dye color, times this weight, so the
     /// solver prefers banners drawn in clean dye colors over mixes that
-    /// average to the right shade. Penalises photographic shades; 0 disables it
+    /// average to the right shade. Penalizes photographic shades; 0 disables it
     #[arg(help_heading = "Generation")]
     #[arg(short = 'U', long, value_name = "WEIGHT")]
     pub purity_weight: Option<f32>,
 
     /// Weight of the gradient term: [default: 0, off]. Every pair of
-    /// neighbouring pixels whose difference does not match the image's is
-    /// charged the mismatch, times this weight, so edges land where the image
-    /// has them and nowhere else. An edge one pixel off is charged twice, so
-    /// pair it with --shift-range; 0 disables it
+    /// neighboring pixels whose difference does not match the image's is
+    /// charged the mismatch, times this weight, which removes pattern texture
+    /// from flat areas. Works best with --feature-weight 0; 0 disables it
     #[arg(help_heading = "Generation")]
     #[arg(short = 'G', long, value_name = "WEIGHT")]
     pub gradient_weight: Option<f32>,
